@@ -36,18 +36,19 @@ Claude로 구조화 요약 출력: 배경 / 방법 / 결과 / 결론 / 핵심메
 ⚠️ 이 기능이 동작해야 이후 모든 기능이 연결됨. 가장 중요한 주차.
 
 
-4주차 (5/22~5/28) — 번역·설명 + 통계 해석 + 중간보고
+4주차 (5/22~5/28) — 번역·설명 + 통계 해석 + 중간보고 ✅ (완료: 2026-06-04)
 
 의학 특화 번역 (의학용어는 영어 유지, 나머지는 자연스러운 한국어)
 통계 해석: p-value, OR, CI 등을 논문 맥락에서 풀어 설명
 중간보고 자료 준비
-완성 기준: 번역·설명 탭 + 통계 해석 탭 각각 작동, 중간보고 PPT 준비 완료
+완성 기준: 번역·설명 탭 + 통계 해석 탭 각각 작동, 중간보고 PPT 준비 완료 ✅
 
-3주차 자산 활용
-- /api/pubmed 그대로 재사용 (논문 본문은 이미 페이지 상태에 적재되어 있음 — loadedPaper.paper.abstract)
-- /api/summarize 코드 패턴(시스템 프롬프트 + JSON 강제 출력 + extractJson)을 복제해서 /api/translate, /api/stats 신규 라우트 생성 권장
-- app/page.tsx 우측 사이드바의 "번역·설명" 탭은 placeholder 상태로 대기 중 (activeTab === "translate" 분기) — 여기에 번역 UI 채우면 됨
-- 통계 해석 탭은 별도 신규 탭으로 추가 필요 (activeTab 타입에 "stats" 추가)
+산출물
+- POST /api/translate — 초록 → { translation, terms[] } JSON (Claude Sonnet 4.6, 자연스러운 한국어 + 의학용어 영어 병기 + 핵심 의학용어 5~10개 해설)
+- POST /api/stats — 초록 → { items[], summary } JSON (Claude Sonnet 4.6, p-value/OR/HR/CI/NNT 등 추출 + 통계적 의미 + 임상적 함의)
+- app/page.tsx — RightTab 타입에 "stats" 추가, LoadedPaper에 translation/statistics optional 필드 통합, 우측 사이드바에 "번역·설명" / "통계 해석" 탭 UI 채움
+- 탭 캐싱 패턴 확립: handleTabChange()에서 첫 클릭 시 fetch → loadedPaper 갱신 → 재클릭 시 즉시 표시 (README의 lazy 캐싱 규칙)
+- 중간보고 PPT (팀에서 별도 작성)
 
 
 5주차 (5/29~6/4) — 배경지식 보완
@@ -55,6 +56,14 @@ Claude로 구조화 요약 출력: 배경 / 방법 / 결과 / 결론 / 핵심메
 논문 읽기 전 사전 개념 카드 3~5개 자동 생성
 논문 본문에 직접 기술되지 않은 배경 개념 포함
 완성 기준: 배경지식 탭에 카드 3~5개 자동 생성
+
+4주차 자산 활용
+- /api/summarize, /api/translate, /api/stats 패턴 그대로 복제해서 /api/background 신규 라우트 생성 권장 (시스템 프롬프트 + JSON 강제 출력 + extractJson)
+- 입력은 동일하게 { title, abstract } 받아 { cards: [{ concept, summary, importance }] } 형태 JSON 출력
+- app/page.tsx의 LoadedPaper 타입에 background?: BackgroundResult optional 필드 추가
+- RightTab 타입에 "background" 추가, handleTabChange() 분기에 추가
+- 탭 캐싱 패턴(handleTranslate/handleStatistics) 그대로 복제하여 handleBackground 핸들러 생성
+- 다른 탭과 다르게 README는 "진입 시 자동 생성"으로 명시되어 있음 — handleAnalyzePaper 마지막에 자동 호출하는 것도 옵션
 
 
 6주차 (6/5~6/11) — Intra-paper QA
@@ -113,7 +122,7 @@ Mermaid 기반 연구 구조 다이어그램 (Claude가 코드 생성)
 
 
 주차별 완성 상태 요약
-주차완성 상태우선순위1개발 환경 세팅 완료-2빈 웹앱 브라우저에서 열림-3논문 입력 → 요약 출력 작동✅ (2026-05-24 완료)4번역·통계 해석 탭 작동 + 중간보고P0 🔴5배경지식 카드 작동P0 🔴6QA 기능 작동P0 🔴7P0 6개 기능 모두 연결된 프로토타입🎯 핵심8퀴즈 또는 신뢰도 카드 추가P1 🟡9시각화 추가P1 🟡10안정화된 버전-11테스트 결과 보고서-12최종 산출물 일체-
+주차완성 상태우선순위1개발 환경 세팅 완료-2빈 웹앱 브라우저에서 열림-3논문 입력 → 요약 출력 작동✅ (2026-05-24 완료)4번역·통계 해석 탭 작동 + 중간보고✅ (2026-06-04 완료)5배경지식 카드 작동P0 🔴6QA 기능 작동P0 🔴7P0 6개 기능 모두 연결된 프로토타입🎯 핵심8퀴즈 또는 신뢰도 카드 추가P1 🟡9시각화 추가P1 🟡10안정화된 버전-11테스트 결과 보고서-12최종 산출물 일체-
 
 P0 핵심 기능 목록
 

@@ -7,7 +7,7 @@ type ChatMessage = {
   text: string;
 };
 
-type RightTab = "qa" | "translate";
+type RightTab = "qa" | "translate" | "stats";
 
 type PubMedPaper = {
   pmid: string;
@@ -27,9 +27,34 @@ type StructuredSummary = {
   keyMessage: string;
 };
 
+type MedicalTerm = {
+  english: string;
+  korean: string;
+  explanation: string;
+};
+
+type TranslationResult = {
+  translation: string;
+  terms: MedicalTerm[];
+};
+
+type StatItem = {
+  metric: string;
+  value: string;
+  interpretation: string;
+  clinicalMeaning: string;
+};
+
+type StatisticsResult = {
+  items: StatItem[];
+  summary: string;
+};
+
 type LoadedPaper = {
   paper: PubMedPaper;
   summary: StructuredSummary;
+  translation?: TranslationResult;
+  statistics?: StatisticsResult;
 };
 
 export default function Home() {
@@ -45,6 +70,12 @@ export default function Home() {
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [translateLoading, setTranslateLoading] = useState(false);
+  const [translateError, setTranslateError] = useState<string | null>(null);
+
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState<string | null>(null);
 
   async function handleAnalyzePaper(queryOverride?: string) {
     const raw = (queryOverride ?? searchQuery).trim();
@@ -91,6 +122,82 @@ export default function Home() {
       setPaperError(e instanceof Error ? e.message : "알 수 없는 오류");
     } finally {
       setPaperLoading(false);
+    }
+  }
+
+  async function handleTranslate(target: LoadedPaper) {
+    if (target.translation || translateLoading) return;
+
+    setTranslateLoading(true);
+    setTranslateError(null);
+
+    try {
+      const res = await fetch("/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: target.paper.title,
+          abstract: target.paper.abstract,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error ?? "번역 생성에 실패했습니다.");
+      }
+
+      const translation = data.translation as TranslationResult;
+      const updated: LoadedPaper = { ...target, translation };
+      setLoadedPaper(updated);
+      setRecentPapers((prev) =>
+        prev.map((p) => (p.paper.pmid === target.paper.pmid ? updated : p)),
+      );
+    } catch (e) {
+      setTranslateError(e instanceof Error ? e.message : "알 수 없는 오류");
+    } finally {
+      setTranslateLoading(false);
+    }
+  }
+
+  async function handleStatistics(target: LoadedPaper) {
+    if (target.statistics || statsLoading) return;
+
+    setStatsLoading(true);
+    setStatsError(null);
+
+    try {
+      const res = await fetch("/api/stats", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: target.paper.title,
+          abstract: target.paper.abstract,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error ?? "통계 해석 생성에 실패했습니다.");
+      }
+
+      const statistics = data.statistics as StatisticsResult;
+      const updated: LoadedPaper = { ...target, statistics };
+      setLoadedPaper(updated);
+      setRecentPapers((prev) =>
+        prev.map((p) => (p.paper.pmid === target.paper.pmid ? updated : p)),
+      );
+    } catch (e) {
+      setStatsError(e instanceof Error ? e.message : "알 수 없는 오류");
+    } finally {
+      setStatsLoading(false);
+    }
+  }
+
+  function handleTabChange(tab: RightTab) {
+    setActiveTab(tab);
+    if (tab === "translate" && loadedPaper && !loadedPaper.translation) {
+      handleTranslate(loadedPaper);
+    }
+    if (tab === "stats" && loadedPaper && !loadedPaper.statistics) {
+      handleStatistics(loadedPaper);
     }
   }
 
@@ -283,7 +390,7 @@ export default function Home() {
         <div className="border-b border-zinc-200">
           <div className="flex">
             <button
-              onClick={() => setActiveTab("qa")}
+              onClick={() => handleTabChange("qa")}
               className={`flex-1 py-3 text-sm font-medium transition-colors ${
                 activeTab === "qa"
                   ? "text-blue-600 border-b-2 border-blue-600"
@@ -293,7 +400,7 @@ export default function Home() {
               Q&A
             </button>
             <button
-              onClick={() => setActiveTab("translate")}
+              onClick={() => handleTabChange("translate")}
               className={`flex-1 py-3 text-sm font-medium transition-colors ${
                 activeTab === "translate"
                   ? "text-blue-600 border-b-2 border-blue-600"
@@ -301,6 +408,16 @@ export default function Home() {
               }`}
             >
               번역·설명
+            </button>
+            <button
+              onClick={() => handleTabChange("stats")}
+              className={`flex-1 py-3 text-sm font-medium transition-colors ${
+                activeTab === "stats"
+                  ? "text-blue-600 border-b-2 border-blue-600"
+                  : "text-zinc-500 hover:text-zinc-700"
+              }`}
+            >
+              통계 해석
             </button>
           </div>
         </div>
@@ -376,12 +493,154 @@ export default function Home() {
           </div>
         )}
 
+        {activeTab === "stats" && (
+          <div className="flex-1 overflow-y-auto p-4">
+            {!loadedPaper ? (
+              <div className="text-center text-sm text-zinc-400 mt-8">
+                <p>통계 해석 탭</p>
+                <p className="text-xs mt-2">
+                  좌측에서 논문을 먼저 분석하세요
+                </p>
+              </div>
+            ) : statsLoading ? (
+              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
+                통계 수치 해석 중입니다...
+              </div>
+            ) : statsError ? (
+              <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-3 text-sm">
+                <div className="font-medium mb-1">오류</div>
+                <div className="text-xs mb-2">{statsError}</div>
+                <button
+                  onClick={() => handleStatistics(loadedPaper)}
+                  className="text-xs underline text-red-600 hover:text-red-700"
+                >
+                  다시 시도
+                </button>
+              </div>
+            ) : loadedPaper.statistics ? (
+              <div className="space-y-6">
+                {loadedPaper.statistics.items.length > 0 ? (
+                  <section>
+                    <h3 className="text-sm font-semibold text-zinc-500 uppercase tracking-wide mb-3">
+                      통계 수치
+                    </h3>
+                    <ul className="space-y-3">
+                      {loadedPaper.statistics.items.map((item, idx) => (
+                        <li
+                          key={`${item.metric}-${idx}`}
+                          className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60"
+                        >
+                          <div className="flex items-baseline gap-2 flex-wrap mb-2">
+                            <span className="text-xs font-semibold text-blue-700 uppercase tracking-wide">
+                              {item.metric}
+                            </span>
+                            <span className="font-mono text-sm text-zinc-900">
+                              {item.value}
+                            </span>
+                          </div>
+                          <p className="text-xs text-zinc-700 leading-relaxed mb-2">
+                            <span className="font-semibold text-zinc-600">
+                              통계적 의미:{" "}
+                            </span>
+                            {item.interpretation}
+                          </p>
+                          <p className="text-xs text-zinc-700 leading-relaxed">
+                            <span className="font-semibold text-zinc-600">
+                              임상적 함의:{" "}
+                            </span>
+                            {item.clinicalMeaning}
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                ) : null}
+
+                {loadedPaper.statistics.summary && (
+                  <section className="border-l-4 border-blue-500 bg-blue-50/40 rounded-r-md p-4">
+                    <h3 className="text-sm font-semibold mb-2">종합</h3>
+                    <p className="text-sm text-zinc-700 leading-relaxed">
+                      {loadedPaper.statistics.summary}
+                    </p>
+                  </section>
+                )}
+              </div>
+            ) : (
+              <div className="text-center text-sm text-zinc-400 mt-8">
+                통계 해석을 불러오는 중...
+              </div>
+            )}
+          </div>
+        )}
+
         {activeTab === "translate" && (
           <div className="flex-1 overflow-y-auto p-4">
-            <div className="text-center text-sm text-zinc-400 mt-8">
-              <p>번역·설명 탭</p>
-              <p className="text-xs mt-2">논문 선택 후 활성화 (추후 구현)</p>
-            </div>
+            {!loadedPaper ? (
+              <div className="text-center text-sm text-zinc-400 mt-8">
+                <p>번역·설명 탭</p>
+                <p className="text-xs mt-2">
+                  좌측에서 논문을 먼저 분석하세요
+                </p>
+              </div>
+            ) : translateLoading ? (
+              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
+                의학 특화 번역 중입니다...
+              </div>
+            ) : translateError ? (
+              <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-3 text-sm">
+                <div className="font-medium mb-1">오류</div>
+                <div className="text-xs mb-2">{translateError}</div>
+                <button
+                  onClick={() => handleTranslate(loadedPaper)}
+                  className="text-xs underline text-red-600 hover:text-red-700"
+                >
+                  다시 시도
+                </button>
+              </div>
+            ) : loadedPaper.translation ? (
+              <div className="space-y-6">
+                <section>
+                  <h3 className="text-sm font-semibold text-zinc-500 uppercase tracking-wide mb-3">
+                    한국어 번역
+                  </h3>
+                  <p className="text-sm text-zinc-800 leading-relaxed whitespace-pre-wrap">
+                    {loadedPaper.translation.translation}
+                  </p>
+                </section>
+
+                {loadedPaper.translation.terms.length > 0 && (
+                  <section>
+                    <h3 className="text-sm font-semibold text-zinc-500 uppercase tracking-wide mb-3">
+                      핵심 의학용어
+                    </h3>
+                    <ul className="space-y-3">
+                      {loadedPaper.translation.terms.map((term, idx) => (
+                        <li
+                          key={`${term.english}-${idx}`}
+                          className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60"
+                        >
+                          <div className="flex items-baseline gap-2 flex-wrap mb-1">
+                            <span className="font-semibold text-sm text-zinc-900">
+                              {term.korean}
+                            </span>
+                            <span className="text-xs text-zinc-500 italic">
+                              {term.english}
+                            </span>
+                          </div>
+                          <p className="text-xs text-zinc-700 leading-relaxed">
+                            {term.explanation}
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+              </div>
+            ) : (
+              <div className="text-center text-sm text-zinc-400 mt-8">
+                번역을 불러오는 중...
+              </div>
+            )}
           </div>
         )}
       </aside>
