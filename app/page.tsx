@@ -7,7 +7,7 @@ type ChatMessage = {
   text: string;
 };
 
-type RightTab = "qa" | "translate" | "stats";
+type RightTab = "qa" | "translate" | "stats" | "background";
 
 type PubMedPaper = {
   pmid: string;
@@ -50,11 +50,22 @@ type StatisticsResult = {
   summary: string;
 };
 
+type BackgroundCard = {
+  concept: string;
+  summary: string;
+  importance: string;
+};
+
+type BackgroundResult = {
+  cards: BackgroundCard[];
+};
+
 type LoadedPaper = {
   paper: PubMedPaper;
   summary: StructuredSummary;
   translation?: TranslationResult;
   statistics?: StatisticsResult;
+  background?: BackgroundResult;
 };
 
 export default function Home() {
@@ -77,6 +88,35 @@ export default function Home() {
   const [statsLoading, setStatsLoading] = useState(false);
   const [statsError, setStatsError] = useState<string | null>(null);
 
+  const [backgroundLoading, setBackgroundLoading] = useState(false);
+  const [backgroundError, setBackgroundError] = useState<string | null>(null);
+
+  // 논문(메타+초록)을 받아 요약 생성 후 상태에 적재 — PMID/DOI 경로와 PDF 경로가 공유
+  async function summarizeAndLoad(paper: PubMedPaper) {
+    const summaryRes = await fetch("/api/summarize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: paper.title,
+        abstract: paper.abstract,
+      }),
+    });
+    const summaryData = await summaryRes.json();
+    if (!summaryRes.ok) {
+      throw new Error(summaryData.error ?? "요약 생성에 실패했습니다.");
+    }
+
+    const loaded: LoadedPaper = {
+      paper,
+      summary: summaryData.summary as StructuredSummary,
+    };
+    setLoadedPaper(loaded);
+    setRecentPapers((prev) => {
+      const without = prev.filter((p) => p.paper.pmid !== paper.pmid);
+      return [loaded, ...without].slice(0, 10);
+    });
+  }
+
   async function handleAnalyzePaper(queryOverride?: string) {
     const raw = (queryOverride ?? searchQuery).trim();
     if (!raw || paperLoading) return;
@@ -94,30 +134,30 @@ export default function Home() {
       if (!pubmedRes.ok) {
         throw new Error(pubmedData.error ?? "논문을 불러오지 못했습니다.");
       }
-      const paper = pubmedData as PubMedPaper;
+      await summarizeAndLoad(pubmedData as PubMedPaper);
+    } catch (e) {
+      setPaperError(e instanceof Error ? e.message : "알 수 없는 오류");
+    } finally {
+      setPaperLoading(false);
+    }
+  }
 
-      const summaryRes = await fetch("/api/summarize", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: paper.title,
-          abstract: paper.abstract,
-        }),
-      });
-      const summaryData = await summaryRes.json();
-      if (!summaryRes.ok) {
-        throw new Error(summaryData.error ?? "요약 생성에 실패했습니다.");
+  async function handlePdfUpload(file: File) {
+    if (paperLoading) return;
+
+    setPaperLoading(true);
+    setPaperError(null);
+
+    try {
+      const form = new FormData();
+      form.append("file", file);
+
+      const pdfRes = await fetch("/api/pdf", { method: "POST", body: form });
+      const pdfData = await pdfRes.json();
+      if (!pdfRes.ok) {
+        throw new Error(pdfData.error ?? "PDF를 분석하지 못했습니다.");
       }
-
-      const loaded: LoadedPaper = {
-        paper,
-        summary: summaryData.summary as StructuredSummary,
-      };
-      setLoadedPaper(loaded);
-      setRecentPapers((prev) => {
-        const without = prev.filter((p) => p.paper.pmid !== paper.pmid);
-        return [loaded, ...without].slice(0, 10);
-      });
+      await summarizeAndLoad(pdfData.paper as PubMedPaper);
     } catch (e) {
       setPaperError(e instanceof Error ? e.message : "알 수 없는 오류");
     } finally {
@@ -191,6 +231,39 @@ export default function Home() {
     }
   }
 
+  async function handleBackground(target: LoadedPaper) {
+    if (target.background || backgroundLoading) return;
+
+    setBackgroundLoading(true);
+    setBackgroundError(null);
+
+    try {
+      const res = await fetch("/api/background", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: target.paper.title,
+          abstract: target.paper.abstract,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error ?? "배경지식 생성에 실패했습니다.");
+      }
+
+      const background = data.background as BackgroundResult;
+      const updated: LoadedPaper = { ...target, background };
+      setLoadedPaper(updated);
+      setRecentPapers((prev) =>
+        prev.map((p) => (p.paper.pmid === target.paper.pmid ? updated : p)),
+      );
+    } catch (e) {
+      setBackgroundError(e instanceof Error ? e.message : "알 수 없는 오류");
+    } finally {
+      setBackgroundLoading(false);
+    }
+  }
+
   function handleTabChange(tab: RightTab) {
     setActiveTab(tab);
     if (tab === "translate" && loadedPaper && !loadedPaper.translation) {
@@ -198,6 +271,9 @@ export default function Home() {
     }
     if (tab === "stats" && loadedPaper && !loadedPaper.statistics) {
       handleStatistics(loadedPaper);
+    }
+    if (tab === "background" && loadedPaper && !loadedPaper.background) {
+      handleBackground(loadedPaper);
     }
   }
 
@@ -263,6 +339,48 @@ export default function Home() {
           >
             {paperLoading ? "분석 중..." : "분석"}
           </button>
+
+          <div className="mt-3 flex items-center gap-2">
+            <div className="flex-1 h-px bg-zinc-200" />
+            <span className="text-xs text-zinc-400">또는</span>
+            <div className="flex-1 h-px bg-zinc-200" />
+          </div>
+
+          <label
+            className={`mt-3 flex items-center justify-center gap-2 w-full px-3 py-2 border border-dashed border-zinc-300 rounded-md text-sm text-zinc-600 transition-colors ${
+              paperLoading
+                ? "cursor-not-allowed opacity-60"
+                : "cursor-pointer hover:bg-zinc-50 hover:border-blue-400"
+            }`}
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={1.5}
+              stroke="currentColor"
+              className="w-4 h-4"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5"
+              />
+            </svg>
+            PDF 업로드
+            <input
+              type="file"
+              accept="application/pdf"
+              disabled={paperLoading}
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handlePdfUpload(file);
+                e.target.value = "";
+              }}
+            />
+          </label>
+
           {paperError && (
             <div className="mt-2 bg-red-50 border border-red-200 text-red-700 rounded-md p-2 text-xs">
               {paperError}
@@ -418,6 +536,16 @@ export default function Home() {
               }`}
             >
               통계 해석
+            </button>
+            <button
+              onClick={() => handleTabChange("background")}
+              className={`flex-1 py-3 text-sm font-medium transition-colors ${
+                activeTab === "background"
+                  ? "text-blue-600 border-b-2 border-blue-600"
+                  : "text-zinc-500 hover:text-zinc-700"
+              }`}
+            >
+              배경지식
             </button>
           </div>
         </div>
@@ -639,6 +767,67 @@ export default function Home() {
             ) : (
               <div className="text-center text-sm text-zinc-400 mt-8">
                 번역을 불러오는 중...
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === "background" && (
+          <div className="flex-1 overflow-y-auto p-4">
+            {!loadedPaper ? (
+              <div className="text-center text-sm text-zinc-400 mt-8">
+                <p>배경지식 탭</p>
+                <p className="text-xs mt-2">
+                  좌측에서 논문을 먼저 분석하세요
+                </p>
+              </div>
+            ) : backgroundLoading ? (
+              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
+                논문을 읽기 위한 배경지식을 정리하는 중입니다...
+              </div>
+            ) : backgroundError ? (
+              <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-3 text-sm">
+                <div className="font-medium mb-1">오류</div>
+                <div className="text-xs mb-2">{backgroundError}</div>
+                <button
+                  onClick={() => handleBackground(loadedPaper)}
+                  className="text-xs underline text-red-600 hover:text-red-700"
+                >
+                  다시 시도
+                </button>
+              </div>
+            ) : loadedPaper.background ? (
+              loadedPaper.background.cards.length > 0 ? (
+                <div className="space-y-3">
+                  <p className="text-xs text-zinc-500 mb-1">
+                    이 논문을 읽기 전에 알아두면 좋은 개념입니다.
+                  </p>
+                  {loadedPaper.background.cards.map((card, idx) => (
+                    <section
+                      key={`${card.concept}-${idx}`}
+                      className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60"
+                    >
+                      <h3 className="font-semibold text-sm text-zinc-900 mb-1">
+                        {card.concept}
+                      </h3>
+                      <p className="text-xs text-zinc-700 leading-relaxed mb-2">
+                        {card.summary}
+                      </p>
+                      <p className="text-xs text-blue-700 leading-relaxed">
+                        <span className="font-semibold">왜 필요한가: </span>
+                        {card.importance}
+                      </p>
+                    </section>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center text-sm text-zinc-400 mt-8">
+                  생성된 배경지식 카드가 없습니다.
+                </div>
+              )
+            ) : (
+              <div className="text-center text-sm text-zinc-400 mt-8">
+                배경지식을 불러오는 중...
               </div>
             )}
           </div>
