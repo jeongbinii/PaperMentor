@@ -31,6 +31,7 @@ type MedicalTerm = {
   english: string;
   korean: string;
   explanation: string;
+  difficulty: "상" | "중";
 };
 
 type TranslationResult = {
@@ -41,8 +42,11 @@ type TranslationResult = {
 type StatItem = {
   metric: string;
   value: string;
+  plain: string;
   interpretation: string;
   clinicalMeaning: string;
+  importance: "핵심" | "보조";
+  caution: string;
 };
 
 type StatisticsResult = {
@@ -659,6 +663,15 @@ export default function Home() {
                           className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60"
                         >
                           <div className="flex items-baseline gap-2 flex-wrap mb-2">
+                            <span
+                              className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                                item.importance === "핵심"
+                                  ? "bg-blue-100 text-blue-700"
+                                  : "bg-zinc-100 text-zinc-500"
+                              }`}
+                            >
+                              {item.importance}
+                            </span>
                             <span className="text-xs font-semibold text-blue-700 uppercase tracking-wide">
                               {item.metric}
                             </span>
@@ -666,9 +679,17 @@ export default function Home() {
                               {item.value}
                             </span>
                           </div>
+                          {item.plain && (
+                            <p className="text-xs text-zinc-700 leading-relaxed mb-2">
+                              <span className="font-semibold text-zinc-600">
+                                쉬운 설명:{" "}
+                              </span>
+                              {item.plain}
+                            </p>
+                          )}
                           <p className="text-xs text-zinc-700 leading-relaxed mb-2">
                             <span className="font-semibold text-zinc-600">
-                              통계적 의미:{" "}
+                              이 수치는:{" "}
                             </span>
                             {item.interpretation}
                           </p>
@@ -678,6 +699,11 @@ export default function Home() {
                             </span>
                             {item.clinicalMeaning}
                           </p>
+                          {item.caution && (
+                            <p className="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-relaxed">
+                              ⚠ {item.caution}
+                            </p>
+                          )}
                         </li>
                       ))}
                     </ul>
@@ -753,6 +779,15 @@ export default function Home() {
                             </span>
                             <span className="text-xs text-zinc-500 italic">
                               {term.english}
+                            </span>
+                            <span
+                              className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                                term.difficulty === "상"
+                                  ? "bg-amber-100 text-amber-700"
+                                  : "bg-zinc-100 text-zinc-500"
+                              }`}
+                            >
+                              {term.difficulty}
                             </span>
                           </div>
                           <p className="text-xs text-zinc-700 leading-relaxed">
