@@ -37,6 +37,7 @@ const SYSTEM_PROMPT = `당신은 의학 논문 학습을 돕는 한국어 AI 튜
 이 탭은 "수치와 그 수치에 쓰인 통계 지표"만 다룹니다. 연구방법론·평가도구(GRADE·AMSTAR·PRISMA·연구설계 등)가 "무엇인지"는 설명하지 않습니다(배경지식 탭 소관). 그런 도구로 산출된 수치(예: "연구의 75%가 보통 질")가 나오면, 도구 자체를 해설하지 말고 그 비율·수치의 통계적 의미만 설명합니다.
 
 공통 규칙:
+- items는 가장 중요한 수치 위주로 최대 8개까지만 만듭니다. 효과크기·수치가 매우 많은 논문(메타분석·umbrella review 등)이면 핵심 결과 위주로 추리고 모든 수치를 나열하지 않습니다.
 - 본문에 명시된 수치만 추출합니다. 본문에 없는 수치를 추정·계산·생성하지 마십시오.
 - value 필드에는 본문 표기 그대로 인용합니다. 단위·반올림·기호 변경 금지.
 - 효과크기와 신뢰구간이 한 쌍으로 보고되면 하나의 item으로 묶습니다 (예: "OR 1.85 (95% CI 1.42-2.41)").
@@ -148,7 +149,7 @@ export async function POST(request: Request) {
 
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 3072,
+      max_tokens: 6144,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userContent }],
     });
