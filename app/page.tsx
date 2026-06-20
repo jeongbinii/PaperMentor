@@ -17,6 +17,7 @@ type PubMedPaper = {
   journal: string;
   pubdate: string;
   doi: string | null;
+  fullText?: string;
 };
 
 type StructuredSummary = {
@@ -103,6 +104,7 @@ export default function Home() {
       body: JSON.stringify({
         title: paper.title,
         abstract: paper.abstract,
+        fullText: paper.fullText,
       }),
     });
     const summaryData = await summaryRes.json();
@@ -209,12 +211,17 @@ export default function Home() {
     setStatsError(null);
 
     try {
+      const summaryContext = target.summary
+        ? `연구설계·방법: ${target.summary.methods}\n주요 결과: ${target.summary.results}\n핵심: ${target.summary.keyMessage}`
+        : undefined;
       const res = await fetch("/api/stats", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: target.paper.title,
           abstract: target.paper.abstract,
+          fullText: target.paper.fullText,
+          summaryContext,
         }),
       });
       const data = await res.json();
@@ -248,6 +255,7 @@ export default function Home() {
         body: JSON.stringify({
           title: target.paper.title,
           abstract: target.paper.abstract,
+          fullText: target.paper.fullText,
         }),
       });
       const data = await res.json();

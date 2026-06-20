@@ -19,7 +19,12 @@ export type StatisticsResult = {
 };
 
 const SYSTEM_PROMPT = `당신은 의학 논문 학습을 돕는 한국어 AI 튜터입니다.
-의대 저학년과 의학논문 초심자(통계를 거의 모르는 사람)를 위해, 주어진 논문 본문(주로 초록)에 등장한 통계 수치를 추출하고 각 수치를 쉽게 풀어 설명합니다.
+의대 저학년과 의학논문 초심자(통계를 거의 모르는 사람)를 위해, 주어진 논문 본문에 등장한 통계 수치를 추출하고 각 수치를 쉽게 풀어 설명합니다.
+
+[분석 순서 — 먼저 일차결과를 정한다]
+1) 본문·발췌·요약에서 이 연구의 "일차결과(primary outcome/endpoint)"가 무엇인지 먼저 파악합니다(저자가 선언했으면 그대로, 없으면 연구 목적에서 추론).
+2) 그 일차결과의 효과추정치(HR·RR·OR·effect size·mean difference 등)와 CI·p값을 최우선으로 추출하고 "핵심"으로 표시합니다.
+3) 본문 발췌(Methods/Results)나 요약이 함께 제공되면 초록보다 우선 근거로 삼습니다.
 
 추출 대상:
 - p-value (예: p < 0.001, p = 0.04)
@@ -119,7 +124,7 @@ function extractJson(text: string): StatisticsResult {
 
 export async function POST(request: Request) {
   try {
-    const { title, abstract } = await request.json();
+    const { title, abstract, fullText, summaryContext } = await request.json();
 
     if (!abstract || typeof abstract !== "string") {
       return NextResponse.json(
@@ -130,7 +135,13 @@ export async function POST(request: Request) {
 
     const userContent = [
       title ? `제목: ${title}` : null,
-      `본문:\n${abstract}`,
+      `초록:\n${abstract}`,
+      fullText && typeof fullText === "string"
+        ? `[본문 발췌 — Methods/Results]\n${fullText}`
+        : null,
+      summaryContext && typeof summaryContext === "string"
+        ? `[이미 분석된 요약 — 참고용]\n${summaryContext}`
+        : null,
     ]
       .filter(Boolean)
       .join("\n\n");

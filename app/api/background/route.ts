@@ -76,7 +76,7 @@ function extractJson(text: string): BackgroundResult {
 
 export async function POST(request: Request) {
   try {
-    const { title, abstract } = await request.json();
+    const { title, abstract, fullText } = await request.json();
 
     if (!abstract || typeof abstract !== "string") {
       return NextResponse.json(
@@ -87,7 +87,10 @@ export async function POST(request: Request) {
 
     const userContent = [
       title ? `제목: ${title}` : null,
-      `본문:\n${abstract}`,
+      `초록:\n${abstract}`,
+      fullText && typeof fullText === "string"
+        ? `[본문 발췌 — Methods/Results]\n${fullText}`
+        : null,
     ]
       .filter(Boolean)
       .join("\n\n");
