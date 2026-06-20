@@ -3,7 +3,13 @@ import { NextResponse } from "next/server";
 
 const client = new Anthropic();
 
+export type KeyFinding = {
+  claim: string;
+  evidence: string;
+};
+
 export type StructuredSummary = {
+  keyFindings: KeyFinding[];
   background: string;
   methods: string;
   results: string;
@@ -27,8 +33,23 @@ const SYSTEM_PROMPT = `당신은 의학 논문 학습을 돕는 한국어 AI 튜
 - 출력 어조: 과제 발표 준비를 옆에서 돕는 톤 (격식·정확·간결). 과한 친근체·이모지·감탄사는 사용하지 않습니다.
 - 출력 어디에도 분면 라벨(Q1·Q2·상·하 등) 또는 내부 분류 코드를 노출하지 않습니다.
 
+[핵심 결과 — keyFindings, 가장 중요]
+이 논문의 핵심 결과를 "주장 + 근거 수치" 쌍으로 1~4개 만듭니다.
+- claim: abstract에서 저자가 내세운 핵심 결과·쟁점을 의학적 평문 한 문장으로. (예: "운동이 폐경 여성의 우울을 개선함", "스트레스에 대한 효과는 불확실함")
+- evidence: 그 주장을 뒷받침하는 본문 수치 + 짧은 해석.
+  · 긍정 주장이면 "얼마나"인지 — 효과크기·CI·유의성 (예: "SMD -0.65, 95% CI -0.90~-0.40 → 중등도 효과, 유의함")
+  · 애매·부정 주장이면 "왜"인지 — 작은 효과크기·CI가 귀무값(1 또는 0) 포함·연구 간 상충 등 (예: "효과크기 작고 95% CI가 0을 포함하여 유의하지 않음")
+- abstract의 주장을 우선으로 잡되, 본문 발췌(Methods/Results)로 수치를 보강합니다. 본문에 정량 수치가 없으면 evidence에 "본문에 정량 수치 없음"이라고 적습니다.
+- 본문에 없는 수치를 만들지 마십시오.
+
 반드시 아래 JSON 스키마만 출력하세요. 주석, 코드블록 표시(\`\`\`), 다른 설명 없이 JSON 객체만 출력합니다.
 {
+  "keyFindings": [
+    {
+      "claim": "abstract 기반 핵심 결과·쟁점 (의학적 평문 한 문장)",
+      "evidence": "그 주장을 뒷받침하는 본문 수치 + 해석 (얼마나/왜)"
+    }
+  ],
   "background": "연구 배경. 왜 이 연구가 필요했는가.",
   "methods": "연구 방법. 연구설계(RCT/코호트/메타분석 등), 표본수, 대상, 그리고 이 연구의 일차결과(primary outcome)가 무엇인지 명시. 분석 방법 포함.",
   "results": "주요 결과. 본문에 명시된 효과크기·신뢰구간·p-value를 표기 그대로 인용. 단정적 임상 효과 과대 해석 금지.",
@@ -46,6 +67,14 @@ function extractJson(text: string): StructuredSummary {
   const slice = trimmed.slice(start, end + 1);
   const parsed = JSON.parse(slice) as Partial<StructuredSummary>;
   return {
+    keyFindings: Array.isArray(parsed.keyFindings)
+      ? parsed.keyFindings
+          .filter(
+            (f): f is KeyFinding =>
+              typeof f?.claim === "string" && typeof f?.evidence === "string",
+          )
+          .map((f) => ({ claim: f.claim, evidence: f.evidence }))
+      : [],
     background: parsed.background ?? "",
     methods: parsed.methods ?? "",
     results: parsed.results ?? "",
@@ -77,7 +106,7 @@ export async function POST(request: Request) {
 
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 2048,
+      max_tokens: 3072,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userContent }],
     });

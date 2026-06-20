@@ -20,7 +20,13 @@ type PubMedPaper = {
   fullText?: string;
 };
 
+type KeyFinding = {
+  claim: string;
+  evidence: string;
+};
+
 type StructuredSummary = {
+  keyFindings: KeyFinding[];
   background: string;
   methods: string;
   results: string;
@@ -469,6 +475,29 @@ export default function Home() {
             </div>
           ) : loadedPaper ? (
             <div className="space-y-6">
+              {loadedPaper.summary.keyFindings?.length > 0 && (
+                <section>
+                  <h3 className="text-base font-semibold mb-2">핵심 결과</h3>
+                  <ul className="space-y-2">
+                    {loadedPaper.summary.keyFindings.map((f, idx) => (
+                      <li
+                        key={idx}
+                        className="border-l-4 border-blue-500 bg-blue-50/40 rounded-r-md p-3"
+                      >
+                        <p className="text-sm font-semibold text-zinc-900 mb-1">
+                          {f.claim}
+                        </p>
+                        <p className="text-xs text-zinc-700 leading-relaxed">
+                          <span className="font-semibold text-zinc-600">
+                            근거:{" "}
+                          </span>
+                          {f.evidence}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
               <SummarySection
                 title="연구 배경"
                 body={loadedPaper.summary.background}
