@@ -7,7 +7,7 @@ type ChatMessage = {
   text: string;
 };
 
-type RightTab = "qa" | "translate" | "stats" | "background";
+type RightTab = "background" | "translate" | "stats" | "qa" | "reliability" | "quiz";
 
 type PubMedPaper = {
   pmid: string;
@@ -71,12 +71,37 @@ type BackgroundResult = {
   cards: BackgroundCard[];
 };
 
+type ReliabilityCard = {
+  category: string;
+  value: string;
+  interpretation: string;
+  level: "높음" | "보통" | "낮음" | "정보없음";
+};
+
+type ReliabilityResult = {
+  cards: ReliabilityCard[];
+  overall: string;
+};
+
+type QuizQuestion = {
+  question: string;
+  options: string[];
+  answer: number;
+  explanation: string;
+};
+
+type QuizResult = {
+  questions: QuizQuestion[];
+};
+
 type LoadedPaper = {
   paper: PubMedPaper;
   summary: StructuredSummary;
   translation?: TranslationResult;
   statistics?: StatisticsResult;
   background?: BackgroundResult;
+  reliability?: ReliabilityResult;
+  quiz?: QuizResult;
 };
 
 export default function Home() {
@@ -102,6 +127,13 @@ export default function Home() {
   const [backgroundLoading, setBackgroundLoading] = useState(false);
   const [backgroundError, setBackgroundError] = useState<string | null>(null);
 
+  const [reliabilityLoading, setReliabilityLoading] = useState(false);
+  const [reliabilityError, setReliabilityError] = useState<string | null>(null);
+
+  const [quizLoading, setQuizLoading] = useState(false);
+  const [quizError, setQuizError] = useState<string | null>(null);
+  const [quizAnswers, setQuizAnswers] = useState<Record<number, number>>({});
+
   // 논문(메타+초록)을 받아 요약 생성 후 상태에 적재 — PMID/DOI 경로와 PDF 경로가 공유
   async function summarizeAndLoad(paper: PubMedPaper) {
     const summaryRes = await fetch("/api/summarize", {
@@ -124,6 +156,7 @@ export default function Home() {
     };
     setLoadedPaper(loaded);
     setChatHistory([]);
+    setQuizAnswers({});
     setActiveTab("background");
     setRecentPapers((prev) => {
       const without = prev.filter((p) => p.paper.pmid !== paper.pmid);
@@ -284,6 +317,67 @@ export default function Home() {
     }
   }
 
+  async function handleReliability(target: LoadedPaper) {
+    if (target.reliability || reliabilityLoading) return;
+    setReliabilityLoading(true);
+    setReliabilityError(null);
+    try {
+      const res = await fetch("/api/reliability", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: target.paper.title,
+          abstract: target.paper.abstract,
+          journal: target.paper.journal,
+          authors: target.paper.authors,
+          pubdate: target.paper.pubdate,
+          doi: target.paper.doi,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "신뢰도 분석에 실패했습니다.");
+      const reliability = data.reliability as ReliabilityResult;
+      const updated: LoadedPaper = { ...target, reliability };
+      setLoadedPaper(updated);
+      setRecentPapers((prev) =>
+        prev.map((p) => (p.paper.pmid === target.paper.pmid ? updated : p)),
+      );
+    } catch (e) {
+      setReliabilityError(e instanceof Error ? e.message : "알 수 없는 오류");
+    } finally {
+      setReliabilityLoading(false);
+    }
+  }
+
+  async function handleQuiz(target: LoadedPaper) {
+    if (target.quiz || quizLoading) return;
+    setQuizLoading(true);
+    setQuizError(null);
+    try {
+      const res = await fetch("/api/quiz", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: target.paper.title,
+          abstract: target.paper.abstract,
+          fullText: target.paper.fullText,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "퀴즈 생성에 실패했습니다.");
+      const quiz = data.quiz as QuizResult;
+      const updated: LoadedPaper = { ...target, quiz };
+      setLoadedPaper(updated);
+      setRecentPapers((prev) =>
+        prev.map((p) => (p.paper.pmid === target.paper.pmid ? updated : p)),
+      );
+    } catch (e) {
+      setQuizError(e instanceof Error ? e.message : "알 수 없는 오류");
+    } finally {
+      setQuizLoading(false);
+    }
+  }
+
   function handleTabChange(tab: RightTab) {
     setActiveTab(tab);
     if (tab === "translate" && loadedPaper && !loadedPaper.translation) {
@@ -294,6 +388,12 @@ export default function Home() {
     }
     if (tab === "background" && loadedPaper && !loadedPaper.background) {
       handleBackground(loadedPaper);
+    }
+    if (tab === "reliability" && loadedPaper && !loadedPaper.reliability) {
+      handleReliability(loadedPaper);
+    }
+    if (tab === "quiz" && loadedPaper && !loadedPaper.quiz) {
+      handleQuiz(loadedPaper);
     }
   }
 
@@ -428,6 +528,7 @@ export default function Home() {
                     onClick={() => {
                       setLoadedPaper(item);
                       setChatHistory([]);
+                      setQuizAnswers({});
                       setActiveTab("background");
                     }}
                     className={`w-full text-left p-2 text-sm rounded-md transition-colors ${
@@ -557,20 +658,22 @@ export default function Home() {
 
       <aside className="w-[30%] min-w-90 bg-white flex flex-col">
         <div className="border-b border-zinc-200">
-          <div className="flex">
+          <div className="flex overflow-x-auto scrollbar-none">
             {(
               [
                 { key: "background", label: "배경지식" },
                 { key: "translate", label: "번역·설명" },
-                { key: "stats", label: "통계 해석" },
+                { key: "stats", label: "통계" },
                 { key: "qa", label: "Q&A" },
+                { key: "reliability", label: "신뢰도" },
+                { key: "quiz", label: "퀴즈" },
               ] as { key: RightTab; label: string }[]
             ).map(({ key, label }) => (
               <button
                 key={key}
                 onClick={() => handleTabChange(key)}
                 disabled={!loadedPaper}
-                className={`flex-1 py-3 text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                className={`shrink-0 px-3 py-3 text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
                   activeTab === key
                     ? "text-blue-600 border-b-2 border-blue-600"
                     : "text-zinc-500 hover:text-zinc-700"
@@ -904,6 +1007,187 @@ export default function Home() {
             ) : (
               <div className="text-center text-sm text-zinc-400 mt-8">
                 배경지식을 불러오는 중...
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === "reliability" && (
+          <div className="flex-1 overflow-y-auto p-4">
+            {!loadedPaper ? (
+              <div className="text-center text-sm text-zinc-400 mt-8">
+                <p>신뢰도 탭</p>
+                <p className="text-xs mt-2">좌측에서 논문을 먼저 분석하세요</p>
+              </div>
+            ) : reliabilityLoading ? (
+              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
+                논문 신뢰도를 분석하는 중입니다...
+              </div>
+            ) : reliabilityError ? (
+              <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-3 text-sm">
+                <div className="font-medium mb-1">오류</div>
+                <div className="text-xs mb-2">{reliabilityError}</div>
+                <button
+                  onClick={() => handleReliability(loadedPaper)}
+                  className="text-xs underline text-red-600 hover:text-red-700"
+                >
+                  다시 시도
+                </button>
+              </div>
+            ) : loadedPaper.reliability ? (
+              <div className="space-y-4">
+                <ul className="space-y-3">
+                  {loadedPaper.reliability.cards.map((card, idx) => (
+                    <li
+                      key={idx}
+                      className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60"
+                    >
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-xs font-semibold text-zinc-500 uppercase tracking-wide">
+                          {card.category}
+                        </span>
+                        <span
+                          className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                            card.level === "높음"
+                              ? "bg-green-100 text-green-700"
+                              : card.level === "보통"
+                                ? "bg-yellow-100 text-yellow-700"
+                                : card.level === "낮음"
+                                  ? "bg-red-100 text-red-700"
+                                  : "bg-zinc-100 text-zinc-500"
+                          }`}
+                        >
+                          {card.level}
+                        </span>
+                      </div>
+                      <p className="text-sm font-medium text-zinc-900 mb-1">
+                        {card.value}
+                      </p>
+                      <p className="text-xs text-zinc-600 leading-relaxed">
+                        {card.interpretation}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+                {loadedPaper.reliability.overall && (
+                  <section className="border-l-4 border-blue-500 bg-blue-50/40 rounded-r-md p-4">
+                    <h3 className="text-sm font-semibold mb-2">종합 평가</h3>
+                    <p className="text-sm text-zinc-700 leading-relaxed">
+                      {loadedPaper.reliability.overall}
+                    </p>
+                  </section>
+                )}
+              </div>
+            ) : (
+              <div className="text-center text-sm text-zinc-400 mt-8">
+                신뢰도 분석을 불러오는 중...
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === "quiz" && (
+          <div className="flex-1 overflow-y-auto p-4">
+            {!loadedPaper ? (
+              <div className="text-center text-sm text-zinc-400 mt-8">
+                <p>퀴즈 탭</p>
+                <p className="text-xs mt-2">좌측에서 논문을 먼저 분석하세요</p>
+              </div>
+            ) : quizLoading ? (
+              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
+                논문 기반 퀴즈를 생성하는 중입니다...
+              </div>
+            ) : quizError ? (
+              <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-3 text-sm">
+                <div className="font-medium mb-1">오류</div>
+                <div className="text-xs mb-2">{quizError}</div>
+                <button
+                  onClick={() => handleQuiz(loadedPaper)}
+                  className="text-xs underline text-red-600 hover:text-red-700"
+                >
+                  다시 시도
+                </button>
+              </div>
+            ) : loadedPaper.quiz ? (
+              <div className="space-y-1">
+                <p className="text-xs text-zinc-500 mb-3">
+                  선택지를 클릭하면 즉시 채점됩니다. &nbsp;
+                  {Object.keys(quizAnswers).length > 0 && (
+                    <span className="font-semibold text-zinc-700">
+                      {Object.keys(quizAnswers).length}/{loadedPaper.quiz.questions.length}문제 완료 &nbsp;·&nbsp;
+                      {Object.entries(quizAnswers).filter(([i, a]) => a === loadedPaper.quiz!.questions[Number(i)].answer).length}개 정답
+                    </span>
+                  )}
+                </p>
+                {loadedPaper.quiz.questions.map((q, qi) => {
+                  const selected = quizAnswers[qi];
+                  const answered = selected !== undefined;
+                  const correct = answered && selected === q.answer;
+                  return (
+                    <section
+                      key={qi}
+                      className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60 mb-3"
+                    >
+                      <p className="text-sm font-medium text-zinc-900 mb-3">
+                        <span className="text-zinc-400 mr-1">Q{qi + 1}.</span>
+                        {q.question}
+                      </p>
+                      <ul className="space-y-1.5">
+                        {q.options.map((opt, oi) => {
+                          let style =
+                            "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100";
+                          if (answered) {
+                            if (oi === q.answer)
+                              style =
+                                "border border-green-400 bg-green-50 text-green-800 font-medium";
+                            else if (oi === selected)
+                              style =
+                                "border border-red-300 bg-red-50 text-red-700";
+                            else style = "border border-zinc-200 bg-white text-zinc-400";
+                          }
+                          return (
+                            <li key={oi}>
+                              <button
+                                onClick={() => {
+                                  if (!answered)
+                                    setQuizAnswers((prev) => ({
+                                      ...prev,
+                                      [qi]: oi,
+                                    }));
+                                }}
+                                disabled={answered}
+                                className={`w-full text-left px-3 py-2 text-xs rounded-md transition-colors ${style} disabled:cursor-default`}
+                              >
+                                <span className="font-semibold mr-1.5">
+                                  {["A", "B", "C", "D"][oi]}.
+                                </span>
+                                {opt}
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                      {answered && (
+                        <div
+                          className={`mt-2 text-xs rounded px-2 py-1.5 leading-relaxed ${
+                            correct
+                              ? "bg-green-50 text-green-800 border border-green-200"
+                              : "bg-red-50 text-red-800 border border-red-200"
+                          }`}
+                        >
+                          <span className="font-semibold">
+                            {correct ? "정답 ✓" : "오답 ✗"}
+                          </span>{" "}
+                          {q.explanation}
+                        </div>
+                      )}
+                    </section>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="text-center text-sm text-zinc-400 mt-8">
+                퀴즈를 불러오는 중...
               </div>
             )}
           </div>
