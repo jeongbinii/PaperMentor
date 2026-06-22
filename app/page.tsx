@@ -309,7 +309,11 @@ export default function Home() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmed }),
+        body: JSON.stringify({
+          message: trimmed,
+          paper: loadedPaper?.paper ?? null,
+          history: chatHistory,
+        }),
       });
 
       const data = await res.json();
@@ -596,10 +600,23 @@ export default function Home() {
             <div className="flex-1 overflow-y-auto p-4 space-y-3">
               {chatHistory.length === 0 && !error && (
                 <div className="text-center text-sm text-zinc-400 mt-8">
-                  <p className="mb-2">Claude API 연결 테스트</p>
-                  <p className="text-xs">
-                    아래에 질문을 입력해 Claude와 대화해보세요.
-                  </p>
+                  {loadedPaper ? (
+                    <>
+                      <p className="mb-2 font-medium text-zinc-500">논문 QA</p>
+                      <p className="text-xs">
+                        논문 내용에 대해 질문하세요.
+                        <br />
+                        논문에 없는 내용은 &quot;이 논문에 없습니다&quot;로 답변합니다.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p className="mb-2">논문을 먼저 불러오세요</p>
+                      <p className="text-xs">
+                        논문 로드 후 해당 논문에 대해 질문할 수 있습니다.
+                      </p>
+                    </>
+                  )}
                 </div>
               )}
               {chatHistory.map((msg, idx) => (
@@ -645,7 +662,7 @@ export default function Home() {
                       handleSendMessage();
                     }
                   }}
-                  placeholder="Claude에게 질문하기 (Enter 전송)"
+                  placeholder={loadedPaper ? "논문에 대해 질문하기 (Enter 전송)" : "논문을 먼저 불러오세요"}
                   rows={2}
                   className="flex-1 px-3 py-2 text-sm border border-zinc-300 rounded-md resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                   disabled={isLoading}
