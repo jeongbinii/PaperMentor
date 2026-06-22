@@ -1,13 +1,19 @@
 "use client";
 
 import { useState } from "react";
+import dynamic from "next/dynamic";
+
+const MermaidDiagram = dynamic(
+  () => import("./components/MermaidDiagram"),
+  { ssr: false },
+);
 
 type ChatMessage = {
   role: "user" | "assistant";
   text: string;
 };
 
-type RightTab = "background" | "translate" | "stats" | "qa" | "reliability" | "quiz";
+type RightTab = "background" | "translate" | "stats" | "qa" | "reliability" | "quiz" | "visualize";
 
 type PubMedPaper = {
   pmid: string;
@@ -94,6 +100,11 @@ type QuizResult = {
   questions: QuizQuestion[];
 };
 
+type VisualizeResult = {
+  mermaid: string;
+  description: string;
+};
+
 type LoadedPaper = {
   paper: PubMedPaper;
   summary: StructuredSummary;
@@ -102,6 +113,7 @@ type LoadedPaper = {
   background?: BackgroundResult;
   reliability?: ReliabilityResult;
   quiz?: QuizResult;
+  visualize?: VisualizeResult;
 };
 
 export default function Home() {
@@ -133,6 +145,9 @@ export default function Home() {
   const [quizLoading, setQuizLoading] = useState(false);
   const [quizError, setQuizError] = useState<string | null>(null);
   const [quizAnswers, setQuizAnswers] = useState<Record<number, number>>({});
+
+  const [visualizeLoading, setVisualizeLoading] = useState(false);
+  const [visualizeError, setVisualizeError] = useState<string | null>(null);
 
   // 논문(메타+초록)을 받아 요약 생성 후 상태에 적재 — PMID/DOI 경로와 PDF 경로가 공유
   async function summarizeAndLoad(paper: PubMedPaper) {
@@ -378,6 +393,35 @@ export default function Home() {
     }
   }
 
+  async function handleVisualize(target: LoadedPaper) {
+    if (target.visualize || visualizeLoading) return;
+    setVisualizeLoading(true);
+    setVisualizeError(null);
+    try {
+      const res = await fetch("/api/visualize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: target.paper.title,
+          abstract: target.paper.abstract,
+          fullText: target.paper.fullText,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "시각화 생성에 실패했습니다.");
+      const visualize = data.visualize as VisualizeResult;
+      const updated: LoadedPaper = { ...target, visualize };
+      setLoadedPaper(updated);
+      setRecentPapers((prev) =>
+        prev.map((p) => (p.paper.pmid === target.paper.pmid ? updated : p)),
+      );
+    } catch (e) {
+      setVisualizeError(e instanceof Error ? e.message : "알 수 없는 오류");
+    } finally {
+      setVisualizeLoading(false);
+    }
+  }
+
   function handleTabChange(tab: RightTab) {
     setActiveTab(tab);
     if (tab === "translate" && loadedPaper && !loadedPaper.translation) {
@@ -394,6 +438,9 @@ export default function Home() {
     }
     if (tab === "quiz" && loadedPaper && !loadedPaper.quiz) {
       handleQuiz(loadedPaper);
+    }
+    if (tab === "visualize" && loadedPaper && !loadedPaper.visualize) {
+      handleVisualize(loadedPaper);
     }
   }
 
@@ -667,6 +714,7 @@ export default function Home() {
                 { key: "qa", label: "Q&A" },
                 { key: "reliability", label: "신뢰도" },
                 { key: "quiz", label: "퀴즈" },
+                { key: "visualize", label: "시각화" },
               ] as { key: RightTab; label: string }[]
             ).map(({ key, label }) => (
               <button
@@ -1188,6 +1236,52 @@ export default function Home() {
             ) : (
               <div className="text-center text-sm text-zinc-400 mt-8">
                 퀴즈를 불러오는 중...
+              </div>
+            )}
+          </div>
+        )}
+        {activeTab === "visualize" && (
+          <div className="flex-1 overflow-y-auto p-4">
+            {!loadedPaper ? (
+              <div className="text-center text-sm text-zinc-400 mt-8">
+                <p>시각화 탭</p>
+                <p className="text-xs mt-2">좌측에서 논문을 먼저 분석하세요</p>
+              </div>
+            ) : visualizeLoading ? (
+              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
+                연구 구조 다이어그램을 생성하는 중입니다...
+              </div>
+            ) : visualizeError ? (
+              <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-3 text-sm">
+                <div className="font-medium mb-1">오류</div>
+                <div className="text-xs mb-2">{visualizeError}</div>
+                <button
+                  onClick={() => handleVisualize(loadedPaper)}
+                  className="text-xs underline text-red-600 hover:text-red-700"
+                >
+                  다시 시도
+                </button>
+              </div>
+            ) : loadedPaper.visualize ? (
+              <div className="space-y-4">
+                <MermaidDiagram code={loadedPaper.visualize.mermaid} />
+                {loadedPaper.visualize.description && (
+                  <p className="text-xs text-zinc-500 leading-relaxed">
+                    {loadedPaper.visualize.description}
+                  </p>
+                )}
+                <details className="text-xs text-zinc-400">
+                  <summary className="cursor-pointer hover:text-zinc-600">
+                    Mermaid 코드 보기
+                  </summary>
+                  <pre className="mt-2 bg-zinc-50 border border-zinc-200 rounded p-2 overflow-x-auto whitespace-pre-wrap">
+                    {loadedPaper.visualize.mermaid}
+                  </pre>
+                </details>
+              </div>
+            ) : (
+              <div className="text-center text-sm text-zinc-400 mt-8">
+                다이어그램을 불러오는 중...
               </div>
             )}
           </div>
