@@ -81,7 +81,7 @@ type LoadedPaper = {
 
 export default function Home() {
   const [searchQuery, setSearchQuery] = useState("");
-  const [activeTab, setActiveTab] = useState<RightTab>("qa");
+  const [activeTab, setActiveTab] = useState<RightTab>("background");
 
   const [paperLoading, setPaperLoading] = useState(false);
   const [paperError, setPaperError] = useState<string | null>(null);
@@ -123,6 +123,8 @@ export default function Home() {
       summary: summaryData.summary as StructuredSummary,
     };
     setLoadedPaper(loaded);
+    setChatHistory([]);
+    setActiveTab("background");
     setRecentPapers((prev) => {
       const without = prev.filter((p) => p.paper.pmid !== paper.pmid);
       return [loaded, ...without].slice(0, 10);
@@ -423,7 +425,11 @@ export default function Home() {
               {recentPapers.map((item) => (
                 <li key={item.paper.pmid}>
                   <button
-                    onClick={() => setLoadedPaper(item)}
+                    onClick={() => {
+                      setLoadedPaper(item);
+                      setChatHistory([]);
+                      setActiveTab("background");
+                    }}
                     className={`w-full text-left p-2 text-sm rounded-md transition-colors ${
                       loadedPaper?.paper.pmid === item.paper.pmid
                         ? "bg-blue-50 text-blue-900 border border-blue-200"
@@ -552,46 +558,27 @@ export default function Home() {
       <aside className="w-[30%] min-w-90 bg-white flex flex-col">
         <div className="border-b border-zinc-200">
           <div className="flex">
-            <button
-              onClick={() => handleTabChange("qa")}
-              className={`flex-1 py-3 text-sm font-medium transition-colors ${
-                activeTab === "qa"
-                  ? "text-blue-600 border-b-2 border-blue-600"
-                  : "text-zinc-500 hover:text-zinc-700"
-              }`}
-            >
-              Q&A
-            </button>
-            <button
-              onClick={() => handleTabChange("translate")}
-              className={`flex-1 py-3 text-sm font-medium transition-colors ${
-                activeTab === "translate"
-                  ? "text-blue-600 border-b-2 border-blue-600"
-                  : "text-zinc-500 hover:text-zinc-700"
-              }`}
-            >
-              번역·설명
-            </button>
-            <button
-              onClick={() => handleTabChange("stats")}
-              className={`flex-1 py-3 text-sm font-medium transition-colors ${
-                activeTab === "stats"
-                  ? "text-blue-600 border-b-2 border-blue-600"
-                  : "text-zinc-500 hover:text-zinc-700"
-              }`}
-            >
-              통계 해석
-            </button>
-            <button
-              onClick={() => handleTabChange("background")}
-              className={`flex-1 py-3 text-sm font-medium transition-colors ${
-                activeTab === "background"
-                  ? "text-blue-600 border-b-2 border-blue-600"
-                  : "text-zinc-500 hover:text-zinc-700"
-              }`}
-            >
-              배경지식
-            </button>
+            {(
+              [
+                { key: "background", label: "배경지식" },
+                { key: "translate", label: "번역·설명" },
+                { key: "stats", label: "통계 해석" },
+                { key: "qa", label: "Q&A" },
+              ] as { key: RightTab; label: string }[]
+            ).map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => handleTabChange(key)}
+                disabled={!loadedPaper}
+                className={`flex-1 py-3 text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                  activeTab === key
+                    ? "text-blue-600 border-b-2 border-blue-600"
+                    : "text-zinc-500 hover:text-zinc-700"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
         </div>
 
