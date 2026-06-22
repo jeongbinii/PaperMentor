@@ -17,9 +17,16 @@ type PubMedPaper = {
   journal: string;
   pubdate: string;
   doi: string | null;
+  fullText?: string;
+};
+
+type KeyFinding = {
+  claim: string;
+  evidence: string;
 };
 
 type StructuredSummary = {
+  keyFindings: KeyFinding[];
   background: string;
   methods: string;
   results: string;
@@ -31,6 +38,7 @@ type MedicalTerm = {
   english: string;
   korean: string;
   explanation: string;
+  difficulty: "상" | "중";
 };
 
 type TranslationResult = {
@@ -41,8 +49,11 @@ type TranslationResult = {
 type StatItem = {
   metric: string;
   value: string;
+  plain: string;
   interpretation: string;
   clinicalMeaning: string;
+  importance: "핵심" | "보조";
+  caution: string;
 };
 
 type StatisticsResult = {
@@ -99,6 +110,7 @@ export default function Home() {
       body: JSON.stringify({
         title: paper.title,
         abstract: paper.abstract,
+        fullText: paper.fullText,
       }),
     });
     const summaryData = await summaryRes.json();
@@ -205,12 +217,17 @@ export default function Home() {
     setStatsError(null);
 
     try {
+      const summaryContext = target.summary
+        ? `연구설계·방법: ${target.summary.methods}\n주요 결과: ${target.summary.results}\n핵심: ${target.summary.keyMessage}`
+        : undefined;
       const res = await fetch("/api/stats", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: target.paper.title,
           abstract: target.paper.abstract,
+          fullText: target.paper.fullText,
+          summaryContext,
         }),
       });
       const data = await res.json();
@@ -244,6 +261,7 @@ export default function Home() {
         body: JSON.stringify({
           title: target.paper.title,
           abstract: target.paper.abstract,
+          fullText: target.paper.fullText,
         }),
       });
       const data = await res.json();
@@ -457,6 +475,29 @@ export default function Home() {
             </div>
           ) : loadedPaper ? (
             <div className="space-y-6">
+              {loadedPaper.summary.keyFindings?.length > 0 && (
+                <section>
+                  <h3 className="text-base font-semibold mb-2">핵심 결과</h3>
+                  <ul className="space-y-2">
+                    {loadedPaper.summary.keyFindings.map((f, idx) => (
+                      <li
+                        key={idx}
+                        className="border-l-4 border-blue-500 bg-blue-50/40 rounded-r-md p-3"
+                      >
+                        <p className="text-sm font-semibold text-zinc-900 mb-1">
+                          {f.claim}
+                        </p>
+                        <p className="text-xs text-zinc-700 leading-relaxed">
+                          <span className="font-semibold text-zinc-600">
+                            근거:{" "}
+                          </span>
+                          {f.evidence}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
               <SummarySection
                 title="연구 배경"
                 body={loadedPaper.summary.background}
@@ -659,6 +700,15 @@ export default function Home() {
                           className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60"
                         >
                           <div className="flex items-baseline gap-2 flex-wrap mb-2">
+                            <span
+                              className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                                item.importance === "핵심"
+                                  ? "bg-blue-100 text-blue-700"
+                                  : "bg-zinc-100 text-zinc-500"
+                              }`}
+                            >
+                              {item.importance}
+                            </span>
                             <span className="text-xs font-semibold text-blue-700 uppercase tracking-wide">
                               {item.metric}
                             </span>
@@ -666,9 +716,17 @@ export default function Home() {
                               {item.value}
                             </span>
                           </div>
+                          {item.plain && (
+                            <p className="text-xs text-zinc-700 leading-relaxed mb-2">
+                              <span className="font-semibold text-zinc-600">
+                                쉬운 설명:{" "}
+                              </span>
+                              {item.plain}
+                            </p>
+                          )}
                           <p className="text-xs text-zinc-700 leading-relaxed mb-2">
                             <span className="font-semibold text-zinc-600">
-                              통계적 의미:{" "}
+                              이 수치는:{" "}
                             </span>
                             {item.interpretation}
                           </p>
@@ -678,6 +736,11 @@ export default function Home() {
                             </span>
                             {item.clinicalMeaning}
                           </p>
+                          {item.caution && (
+                            <p className="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-relaxed">
+                              ⚠ {item.caution}
+                            </p>
+                          )}
                         </li>
                       ))}
                     </ul>
@@ -753,6 +816,15 @@ export default function Home() {
                             </span>
                             <span className="text-xs text-zinc-500 italic">
                               {term.english}
+                            </span>
+                            <span
+                              className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                                term.difficulty === "상"
+                                  ? "bg-amber-100 text-amber-700"
+                                  : "bg-zinc-100 text-zinc-500"
+                              }`}
+                            >
+                              {term.difficulty}
                             </span>
                           </div>
                           <p className="text-xs text-zinc-700 leading-relaxed">

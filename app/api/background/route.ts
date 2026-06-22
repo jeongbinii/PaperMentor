@@ -18,7 +18,12 @@ const SYSTEM_PROMPT = `당신은 의학 논문 학습을 돕는 한국어 AI 튜
 
 목적:
 - 독자가 본문을 이해하는 데 필요한 선행 개념을 미리 짚어줍니다.
-- 본문에 직접 기술되지 않았더라도, 본문 주제를 이해하기 위해 전제되는 개념을 포함합니다 (예: 질환 기전, 표준 치료, 핵심 검사·지표의 정의, 연구 설계 용어).
+- 본문에 직접 기술되지 않았더라도, 본문 주제를 이해하기 위해 전제되는 개념을 포함합니다.
+- 이 탭이 "개념 설명"을 전담합니다. 다음을 모두 여기서 다룹니다:
+  · 임상 배경 — 질환 기전, 표준 치료, 핵심 검사·지표의 정의
+  · 연구방법론·연구설계·평가도구 — 예: umbrella review, systematic review, meta-analysis, RCT, cohort, GRADE, AMSTAR, PRISMA
+  · 통계 개념 자체 — 예: 이질성(heterogeneity), 효과크기(effect size), 신뢰구간이 무엇인지
+- 단, 본문에 나온 "개별 수치"의 해석(예: HR 0.74가 무슨 뜻인지)은 여기서 하지 않습니다(통계 탭 소관). 개념이 "무엇인지"만 설명합니다.
 
 카드 선정 규칙:
 - 본 논문의 주제·방법·결과를 이해하는 데 가장 핵심이 되는 개념부터 3~5개를 고릅니다.
@@ -71,7 +76,7 @@ function extractJson(text: string): BackgroundResult {
 
 export async function POST(request: Request) {
   try {
-    const { title, abstract } = await request.json();
+    const { title, abstract, fullText } = await request.json();
 
     if (!abstract || typeof abstract !== "string") {
       return NextResponse.json(
@@ -82,7 +87,10 @@ export async function POST(request: Request) {
 
     const userContent = [
       title ? `제목: ${title}` : null,
-      `본문:\n${abstract}`,
+      `초록:\n${abstract}`,
+      fullText && typeof fullText === "string"
+        ? `[본문 발췌 — Methods/Results]\n${fullText}`
+        : null,
     ]
       .filter(Boolean)
       .join("\n\n");

@@ -14,9 +14,10 @@ export type PubMedPaper = {
   journal: string;
   pubdate: string;
   doi: string | null;
+  fullText: string;
 };
 
-const SYSTEM_PROMPT = `당신은 업로드된 의학 논문 PDF에서 서지정보와 초록을 추출하는 도우미입니다.
+const SYSTEM_PROMPT = `당신은 업로드된 의학 논문 PDF에서 서지정보·초록과 분석에 필요한 본문 핵심(방법·결과)을 추출하는 도우미입니다.
 PDF 본문을 읽고 지정된 형식으로 추출합니다.
 
 추출 규칙:
@@ -26,6 +27,8 @@ PDF 본문을 읽고 지정된 형식으로 추출합니다.
 - journal: 저널/학술지명. 없으면 빈 문자열.
 - pubdate: 출판 연도 또는 날짜 (예: "2023" 또는 "2023 May"). 없으면 빈 문자열.
 - doi: DOI 문자열 (예: "10.1056/NEJMoa2034577"). 없으면 null.
+- methods: 연구방법 섹션의 핵심을 본문에서 발췌. 특히 (1) 연구설계(RCT·코호트·메타분석·umbrella review 등), (2) 대상·표본수, (3) "일차결과(primary outcome/endpoint)"가 무엇으로 정의되었는지를 반드시 포함합니다. 본문 표현 그대로, 없으면 빈 문자열.
+- results: 결과 섹션에서 주요 결과 수치를 발췌. 특히 일차결과의 효과추정치(HR·RR·OR·effect size·mean difference 등)와 그 CI·p값을 본문 표기 그대로 옮깁니다. 핵심 수치를 누락하지 마십시오. 없으면 빈 문자열.
 - PDF에 명시되지 않은 정보를 추측하거나 생성하지 마십시오.`;
 
 // structured outputs용 JSON 스키마 — Claude가 스키마에 맞는 유효한 JSON만 출력하도록 강제
@@ -38,8 +41,19 @@ const OUTPUT_SCHEMA = {
     journal: { type: "string" },
     pubdate: { type: "string" },
     doi: { type: ["string", "null"] },
+    methods: { type: "string" },
+    results: { type: "string" },
   },
-  required: ["title", "abstract", "authors", "journal", "pubdate", "doi"],
+  required: [
+    "title",
+    "abstract",
+    "authors",
+    "journal",
+    "pubdate",
+    "doi",
+    "methods",
+    "results",
+  ],
   additionalProperties: false,
 } as const;
 
@@ -50,6 +64,8 @@ type ExtractedPaper = {
   journal: string;
   pubdate: string;
   doi: string | null;
+  methods: string;
+  results: string;
 };
 
 function extractJson(text: string): ExtractedPaper {
@@ -64,6 +80,8 @@ function extractJson(text: string): ExtractedPaper {
     journal: typeof parsed.journal === "string" ? parsed.journal : "",
     pubdate: typeof parsed.pubdate === "string" ? parsed.pubdate : "",
     doi: typeof parsed.doi === "string" && parsed.doi.trim() ? parsed.doi : null,
+    methods: typeof parsed.methods === "string" ? parsed.methods : "",
+    results: typeof parsed.results === "string" ? parsed.results : "",
   };
 }
 
@@ -95,7 +113,7 @@ export async function POST(request: Request) {
 
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 4096,
+      max_tokens: 8192,
       system: SYSTEM_PROMPT,
       output_config: {
         format: { type: "json_schema", schema: OUTPUT_SCHEMA },
@@ -114,7 +132,7 @@ export async function POST(request: Request) {
             },
             {
               type: "text",
-              text: "이 PDF에서 서지정보와 초록을 추출해 지정된 JSON으로 출력하세요.",
+              text: "이 PDF에서 서지정보·초록과 방법(methods)·결과(results) 핵심을 추출해 지정된 JSON으로 출력하세요.",
             },
           ],
         },
@@ -135,6 +153,14 @@ export async function POST(request: Request) {
       );
     }
 
+    // Methods/Results 발췌를 분석 파이프라인용 본문(fullText)으로 결합
+    const fullText = [
+      extracted.methods ? `[Methods]\n${extracted.methods}` : "",
+      extracted.results ? `[Results]\n${extracted.results}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+
     // 기존 PubMed 파이프라인과 동일한 모양으로 반환 (pmid는 합성 식별자)
     const syntheticId =
       extracted.doi ?? `pdf:${file.name.replace(/\.pdf$/i, "")}`;
@@ -147,6 +173,7 @@ export async function POST(request: Request) {
       journal: extracted.journal,
       pubdate: extracted.pubdate,
       doi: extracted.doi,
+      fullText,
     };
 
     return NextResponse.json({ paper, usage: response.usage });
