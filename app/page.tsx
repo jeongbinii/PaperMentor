@@ -1,12 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import dynamic from "next/dynamic";
-
-const MermaidDiagram = dynamic(
-  () => import("./components/MermaidDiagram"),
-  { ssr: false },
-);
+import GraphicalAbstract from "./components/GraphicalAbstract";
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -100,9 +95,22 @@ type QuizResult = {
   questions: QuizQuestion[];
 };
 
+type VisualizeOutcome = {
+  metric: string;
+  value: string;
+  detail: string;
+  direction: "benefit" | "harm" | "neutral";
+  primary: boolean;
+};
+
 type VisualizeResult = {
-  mermaid: string;
-  description: string;
+  headline: string;
+  studyType: string;
+  population: string;
+  intervention: string;
+  comparison: string;
+  outcomes: VisualizeOutcome[];
+  conclusion: string;
 };
 
 type LoadedPaper = {
@@ -122,6 +130,7 @@ export default function Home() {
 
   const [paperLoading, setPaperLoading] = useState(false);
   const [paperError, setPaperError] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const [loadedPaper, setLoadedPaper] = useState<LoadedPaper | null>(null);
   const [recentPapers, setRecentPapers] = useState<LoadedPaper[]>([]);
 
@@ -225,6 +234,17 @@ export default function Home() {
     } finally {
       setPaperLoading(false);
     }
+  }
+
+  function acceptPdfFile(file: File | undefined | null) {
+    if (!file) return;
+    const isPdf =
+      file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+    if (!isPdf) {
+      setPaperError("PDF 파일만 업로드할 수 있습니다.");
+      return;
+    }
+    handlePdfUpload(file);
   }
 
   async function handleTranslate(target: LoadedPaper) {
@@ -518,10 +538,26 @@ export default function Home() {
           </div>
 
           <label
-            className={`mt-3 flex items-center justify-center gap-2 w-full px-3 py-2 border border-dashed border-zinc-300 rounded-md text-sm text-zinc-600 transition-colors ${
+            onDragOver={(e) => {
+              e.preventDefault();
+              if (!paperLoading) setIsDragging(true);
+            }}
+            onDragLeave={(e) => {
+              e.preventDefault();
+              setIsDragging(false);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDragging(false);
+              if (paperLoading) return;
+              acceptPdfFile(e.dataTransfer.files?.[0]);
+            }}
+            className={`mt-3 flex flex-col items-center justify-center gap-1 w-full px-3 py-4 border border-dashed rounded-md text-sm transition-colors ${
               paperLoading
-                ? "cursor-not-allowed opacity-60"
-                : "cursor-pointer hover:bg-zinc-50 hover:border-blue-400"
+                ? "cursor-not-allowed opacity-60 border-zinc-300 text-zinc-600"
+                : isDragging
+                  ? "cursor-copy border-blue-500 bg-blue-50 text-blue-700"
+                  : "cursor-pointer border-zinc-300 text-zinc-600 hover:bg-zinc-50 hover:border-blue-400"
             }`}
           >
             <svg
@@ -530,7 +566,7 @@ export default function Home() {
               viewBox="0 0 24 24"
               strokeWidth={1.5}
               stroke="currentColor"
-              className="w-4 h-4"
+              className="w-5 h-5"
             >
               <path
                 strokeLinecap="round"
@@ -538,15 +574,19 @@ export default function Home() {
                 d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5"
               />
             </svg>
-            PDF 업로드
+            <span className="font-medium">
+              {isDragging ? "여기에 놓으세요" : "PDF 업로드"}
+            </span>
+            <span className="text-xs text-zinc-400">
+              클릭하거나 파일을 끌어다 놓기
+            </span>
             <input
               type="file"
               accept="application/pdf"
               disabled={paperLoading}
               className="hidden"
               onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) handlePdfUpload(file);
+                acceptPdfFile(e.target.files?.[0]);
                 e.target.value = "";
               }}
             />
@@ -1249,7 +1289,7 @@ export default function Home() {
               </div>
             ) : visualizeLoading ? (
               <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
-                연구 구조 다이어그램을 생성하는 중입니다...
+                graphical abstract를 생성하는 중입니다...
               </div>
             ) : visualizeError ? (
               <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-3 text-sm">
@@ -1263,25 +1303,10 @@ export default function Home() {
                 </button>
               </div>
             ) : loadedPaper.visualize ? (
-              <div className="space-y-4">
-                <MermaidDiagram code={loadedPaper.visualize.mermaid} />
-                {loadedPaper.visualize.description && (
-                  <p className="text-xs text-zinc-500 leading-relaxed">
-                    {loadedPaper.visualize.description}
-                  </p>
-                )}
-                <details className="text-xs text-zinc-400">
-                  <summary className="cursor-pointer hover:text-zinc-600">
-                    Mermaid 코드 보기
-                  </summary>
-                  <pre className="mt-2 bg-zinc-50 border border-zinc-200 rounded p-2 overflow-x-auto whitespace-pre-wrap">
-                    {loadedPaper.visualize.mermaid}
-                  </pre>
-                </details>
-              </div>
+              <GraphicalAbstract data={loadedPaper.visualize} />
             ) : (
               <div className="text-center text-sm text-zinc-400 mt-8">
-                다이어그램을 불러오는 중...
+                graphical abstract를 불러오는 중...
               </div>
             )}
           </div>
