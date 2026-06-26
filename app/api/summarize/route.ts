@@ -6,6 +6,7 @@ const client = new Anthropic();
 export type KeyFinding = {
   claim: string;
   evidence: string;
+  source: string;
 };
 
 export type StructuredSummary = {
@@ -41,13 +42,19 @@ const SYSTEM_PROMPT = `당신은 의학 논문 학습을 돕는 한국어 AI 튜
   · 애매·부정 주장이면 "왜"인지 — 작은 효과크기·CI가 귀무값(1 또는 0) 포함·연구 간 상충 등 (예: "효과크기 작고 95% CI가 0을 포함하여 유의하지 않음")
 - abstract의 주장을 우선으로 잡되, 본문 발췌(Methods/Results)로 수치를 보강합니다. 본문에 정량 수치가 없으면 evidence에 "본문에 정량 수치 없음"이라고 적습니다.
 - 본문에 없는 수치를 만들지 마십시오.
+- source: 이 claim의 직접적 근거가 된 원문 문장을, 제공된 초록·본문에서 "있는 그대로(verbatim) 한 글자도 바꾸지 말고" 복사합니다.
+  · 원문의 언어(주로 영어) 그대로. 한국어로 번역하지 마십시오.
+  · 1~2개 연속된 문장. 중간을 생략(…)하거나 여러 군데를 이어붙이지 마십시오. 반드시 원문에 그대로 존재하는 "연속된 부분 문자열"이어야 합니다(독자가 원문에서 형광펜으로 찾을 수 있어야 함).
+  · 가장 근거가 되는 한 문장이 핵심입니다. 수치가 있으면 그 수치가 들어 있는 문장을 고릅니다.
+  · 적절한 단일 근거 문장을 찾지 못하면 빈 문자열("")로 둡니다.
 
 반드시 아래 JSON 스키마만 출력하세요. 주석, 코드블록 표시(\`\`\`), 다른 설명 없이 JSON 객체만 출력합니다.
 {
   "keyFindings": [
     {
       "claim": "abstract 기반 핵심 결과·쟁점 (의학적 평문 한 문장)",
-      "evidence": "그 주장을 뒷받침하는 본문 수치 + 해석 (얼마나/왜)"
+      "evidence": "그 주장을 뒷받침하는 본문 수치 + 해석 (얼마나/왜)",
+      "source": "이 결과의 근거가 된 원문 문장을 원어 그대로 복사 (없으면 빈 문자열)"
     }
   ],
   "background": "연구 배경. 왜 이 연구가 필요했는가.",
@@ -73,7 +80,11 @@ function extractJson(text: string): StructuredSummary {
             (f): f is KeyFinding =>
               typeof f?.claim === "string" && typeof f?.evidence === "string",
           )
-          .map((f) => ({ claim: f.claim, evidence: f.evidence }))
+          .map((f) => ({
+            claim: f.claim,
+            evidence: f.evidence,
+            source: typeof f.source === "string" ? f.source : "",
+          }))
       : [],
     background: parsed.background ?? "",
     methods: parsed.methods ?? "",
