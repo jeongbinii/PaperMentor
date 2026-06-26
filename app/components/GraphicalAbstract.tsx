@@ -2,35 +2,10 @@
 
 import type {
   GraphicalAbstract as GAData,
-  GAOutcome,
   GANode,
   GAEdge,
   GAPathway,
 } from "../api/visualize/route";
-
-const TONE: Record<
-  GAOutcome["direction"],
-  { box: string; value: string; pill: string; label: string }
-> = {
-  benefit: {
-    box: "border-emerald-200 bg-emerald-50",
-    value: "text-emerald-700",
-    pill: "bg-emerald-100 text-emerald-700",
-    label: "유리",
-  },
-  harm: {
-    box: "border-rose-200 bg-rose-50",
-    value: "text-rose-700",
-    pill: "bg-rose-100 text-rose-700",
-    label: "불리",
-  },
-  neutral: {
-    box: "border-zinc-200 bg-zinc-50",
-    value: "text-zinc-700",
-    pill: "bg-zinc-200 text-zinc-600",
-    label: "차이 없음·불확실",
-  },
-};
 
 function DownArrow() {
   return (
@@ -81,31 +56,6 @@ const IconCompare = (
     <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16M5 8h14M5 8l-2 4h4l-2-4zm14 0l-2 4h4l-2-4z" />
   </svg>
 );
-
-function OutcomeCard({ o }: { o: GAOutcome }) {
-  const tone = TONE[o.direction];
-  return (
-    <div className={`rounded-lg border p-3 ${tone.box}`}>
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 min-w-0">
-          {o.primary && (
-            <span className="shrink-0 rounded bg-blue-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
-              1차 결과
-            </span>
-          )}
-          <span className="truncate text-xs font-medium text-zinc-600">{o.metric}</span>
-        </div>
-        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${tone.pill}`}>
-          {tone.label}
-        </span>
-      </div>
-      <div className={`text-2xl font-bold leading-tight break-words ${tone.value}`}>
-        {o.value || "—"}
-      </div>
-      {o.detail && <div className="mt-1 text-xs text-zinc-500 break-words">{o.detail}</div>}
-    </div>
-  );
-}
 
 const NODE_STYLE: Record<GANode["kind"], string> = {
   molecule: "border-indigo-200 bg-indigo-50 text-indigo-900",
@@ -212,18 +162,6 @@ export default function GraphicalAbstract({ data }: { data: GAData }) {
           </>
         )}
       </div>
-
-      {/* 핵심 결과 */}
-      {data.outcomes.length > 0 && (
-        <div className="space-y-2 pt-1">
-          <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
-            핵심 결과
-          </h4>
-          {data.outcomes.map((o, i) => (
-            <OutcomeCard key={i} o={o} />
-          ))}
-        </div>
-      )}
 
       {/* 결론 */}
       {data.conclusion && (
