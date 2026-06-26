@@ -151,6 +151,31 @@ export default function Home() {
   const [leftW, setLeftW] = useState(288);
   const [rightW, setRightW] = useState(440);
   const resizingRef = useRef<null | "left" | "right">(null);
+  const leftWRef = useRef(leftW);
+  const rightWRef = useRef(rightW);
+  useEffect(() => {
+    leftWRef.current = leftW;
+    rightWRef.current = rightW;
+  });
+
+  // 창 크기에 맞춰 패널 너비 보정 (작은 창에서 가운데가 붕괴/가로스크롤 방지)
+  useEffect(() => {
+    function clampToViewport() {
+      const total = window.innerWidth;
+      const MIN_CENTER = 320;
+      const MIN_LEFT = 200;
+      const MIN_RIGHT = 300;
+      let r = rightWRef.current;
+      let l = leftWRef.current;
+      r = Math.max(MIN_RIGHT, Math.min(r, total - MIN_LEFT - MIN_CENTER));
+      l = Math.max(MIN_LEFT, Math.min(l, total - r - MIN_CENTER));
+      setLeftW(l);
+      setRightW(r);
+    }
+    clampToViewport();
+    window.addEventListener("resize", clampToViewport);
+    return () => window.removeEventListener("resize", clampToViewport);
+  }, []);
 
   useEffect(() => {
     const MIN_LEFT = 200;
@@ -595,7 +620,7 @@ export default function Home() {
   }
 
   return (
-    <div className="flex flex-1 h-screen bg-zinc-50 text-zinc-900">
+    <div className="flex flex-1 h-screen overflow-hidden bg-zinc-50 text-zinc-900">
       <aside
         style={{ width: leftW }}
         className="shrink-0 border-r border-zinc-200 bg-white flex flex-col overflow-hidden"
