@@ -136,6 +136,7 @@ type LoadedPaper = {
   reliability?: ReliabilityResult;
   quiz?: QuizResult;
   visualize?: VisualizeResult;
+  geminiImage?: string;
 };
 
 export default function Home() {
@@ -212,6 +213,8 @@ export default function Home() {
 
   const [visualizeLoading, setVisualizeLoading] = useState(false);
   const [visualizeError, setVisualizeError] = useState<string | null>(null);
+  const [geminiLoading, setGeminiLoading] = useState(false);
+  const [geminiError, setGeminiError] = useState<string | null>(null);
 
   // 논문(메타+초록)을 받아 요약 생성 후 상태에 적재 — PMID/DOI 경로와 PDF 경로가 공유
   async function summarizeAndLoad(paper: PubMedPaper) {
@@ -494,6 +497,36 @@ export default function Home() {
       setVisualizeError(e instanceof Error ? e.message : "알 수 없는 오류");
     } finally {
       setVisualizeLoading(false);
+    }
+  }
+
+  async function handleGeminiImage(target: LoadedPaper) {
+    if (geminiLoading) return;
+    setGeminiLoading(true);
+    setGeminiError(null);
+    try {
+      const res = await fetch("/api/visualize-image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: target.paper.title,
+          keyFindings: target.summary.keyFindings,
+          methods: target.summary.methods,
+          results: target.summary.results,
+          conclusion: target.summary.conclusion,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "이미지 생성에 실패했습니다.");
+      const updated: LoadedPaper = { ...target, geminiImage: data.image as string };
+      setLoadedPaper(updated);
+      setRecentPapers((prev) =>
+        prev.map((p) => (p.paper.pmid === target.paper.pmid ? updated : p)),
+      );
+    } catch (e) {
+      setGeminiError(e instanceof Error ? e.message : "알 수 없는 오류");
+    } finally {
+      setGeminiLoading(false);
     }
   }
 
@@ -1376,7 +1409,63 @@ export default function Home() {
                 </button>
               </div>
             ) : loadedPaper.visualize ? (
-              <GraphicalAbstract data={loadedPaper.visualize} />
+              <div className="space-y-4">
+                {/* Gemini NEJM 스타일 이미지 (실험적) */}
+                <div className="rounded-xl border border-zinc-200 bg-white p-3">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                      NEJM 스타일 이미지 · Gemini (실험적)
+                    </span>
+                    <button
+                      onClick={() => handleGeminiImage(loadedPaper)}
+                      disabled={geminiLoading}
+                      className="rounded-md bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-zinc-700 disabled:bg-zinc-300"
+                    >
+                      {geminiLoading
+                        ? "생성 중..."
+                        : loadedPaper.geminiImage
+                          ? "다시 생성"
+                          : "이미지 생성"}
+                    </button>
+                  </div>
+                  {geminiError ? (
+                    <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-2 text-xs">
+                      {geminiError}
+                    </div>
+                  ) : geminiLoading ? (
+                    <div className="text-center text-xs text-zinc-400 py-6 animate-pulse">
+                      Gemini가 이미지를 생성하는 중입니다... (수십 초 소요)
+                    </div>
+                  ) : loadedPaper.geminiImage ? (
+                    <div className="space-y-2">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={loadedPaper.geminiImage}
+                        alt="Gemini 생성 graphical abstract"
+                        className="w-full rounded-md border border-zinc-200"
+                      />
+                      <div className="flex items-center justify-between">
+                        <a
+                          href={loadedPaper.geminiImage}
+                          download="graphical-abstract.png"
+                          className="text-[11px] text-blue-600 underline hover:text-blue-700"
+                        >
+                          이미지 저장
+                        </a>
+                        <span className="text-[10px] text-amber-600">
+                          ⚠ 차트·수치·이미지는 AI 생성물 — 원문과 대조 검증 필요
+                        </span>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-zinc-400 py-2">
+                      핵심 결과를 바탕으로 Gemini가 NEJM 스타일 이미지를 생성합니다. 위 버튼을 누르세요.
+                    </p>
+                  )}
+                </div>
+
+                <GraphicalAbstract data={loadedPaper.visualize} />
+              </div>
             ) : (
               <div className="text-center text-sm text-zinc-400 mt-8">
                 graphical abstract를 불러오는 중...
