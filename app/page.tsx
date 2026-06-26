@@ -215,6 +215,9 @@ export default function Home() {
   const [visualizeError, setVisualizeError] = useState<string | null>(null);
   const [geminiLoading, setGeminiLoading] = useState(false);
   const [geminiError, setGeminiError] = useState<string | null>(null);
+  const [imageProvider, setImageProvider] = useState<
+    "gemini" | "openai" | "flux" | "ideogram"
+  >("gemini");
 
   // 논문(메타+초록)을 받아 요약 생성 후 상태에 적재 — PMID/DOI 경로와 PDF 경로가 공유
   async function summarizeAndLoad(paper: PubMedPaper) {
@@ -500,7 +503,7 @@ export default function Home() {
     }
   }
 
-  async function handleGeminiImage(target: LoadedPaper) {
+  async function handleGenerateImage(target: LoadedPaper) {
     if (geminiLoading) return;
     setGeminiLoading(true);
     setGeminiError(null);
@@ -509,6 +512,7 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          provider: imageProvider,
           title: target.paper.title,
           keyFindings: target.summary.keyFindings,
           methods: target.summary.methods,
@@ -1410,14 +1414,14 @@ export default function Home() {
               </div>
             ) : loadedPaper.visualize ? (
               <div className="space-y-4">
-                {/* Gemini NEJM 스타일 이미지 (실험적) */}
+                {/* NEJM 스타일 이미지 — 제공자 선택형 (실험적) */}
                 <div className="rounded-xl border border-zinc-200 bg-white p-3">
                   <div className="flex items-center justify-between gap-2 mb-2">
                     <span className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
-                      NEJM 스타일 이미지 · Gemini (실험적)
+                      NEJM 스타일 이미지 (실험적)
                     </span>
                     <button
-                      onClick={() => handleGeminiImage(loadedPaper)}
+                      onClick={() => handleGenerateImage(loadedPaper)}
                       disabled={geminiLoading}
                       className="rounded-md bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-zinc-700 disabled:bg-zinc-300"
                     >
@@ -1427,6 +1431,30 @@ export default function Home() {
                           ? "다시 생성"
                           : "이미지 생성"}
                     </button>
+                  </div>
+                  {/* 제공자 선택 */}
+                  <div className="mb-2 flex flex-wrap gap-1">
+                    {(
+                      [
+                        ["gemini", "Gemini"],
+                        ["openai", "OpenAI"],
+                        ["flux", "Flux"],
+                        ["ideogram", "Ideogram"],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <button
+                        key={key}
+                        onClick={() => setImageProvider(key)}
+                        disabled={geminiLoading}
+                        className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-50 ${
+                          imageProvider === key
+                            ? "bg-blue-600 text-white"
+                            : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
                   </div>
                   {geminiError ? (
                     <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-2 text-xs">
