@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import GraphicalAbstract from "./components/GraphicalAbstract";
 
 type ChatMessage = {
@@ -103,12 +103,26 @@ type VisualizeOutcome = {
   primary: boolean;
 };
 
+type VisualizeNode = {
+  id: string;
+  label: string;
+  kind: "molecule" | "process" | "phenotype";
+};
+
+type VisualizeEdge = {
+  from: string;
+  to: string;
+  effect: "activate" | "inhibit" | "lead";
+  label: string;
+};
+
 type VisualizeResult = {
   headline: string;
   studyType: string;
   population: string;
   intervention: string;
   comparison: string;
+  pathway: { nodes: VisualizeNode[]; edges: VisualizeEdge[] };
   outcomes: VisualizeOutcome[];
   conclusion: string;
 };
@@ -131,6 +145,47 @@ export default function Home() {
   const [paperLoading, setPaperLoading] = useState(false);
   const [paperError, setPaperError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+
+  // 3분할 패널 너비 (px) — 가운데(main)는 flex-1로 나머지 차지
+  const [leftW, setLeftW] = useState(288);
+  const [rightW, setRightW] = useState(440);
+  const resizingRef = useRef<null | "left" | "right">(null);
+
+  useEffect(() => {
+    const MIN_LEFT = 200;
+    const MIN_RIGHT = 320;
+    const MIN_CENTER = 360;
+    function onMove(e: MouseEvent) {
+      const side = resizingRef.current;
+      if (!side) return;
+      const total = window.innerWidth;
+      if (side === "left") {
+        const max = total - rightW - MIN_CENTER;
+        setLeftW(Math.max(MIN_LEFT, Math.min(e.clientX, max)));
+      } else {
+        const max = total - leftW - MIN_CENTER;
+        setRightW(Math.max(MIN_RIGHT, Math.min(total - e.clientX, max)));
+      }
+    }
+    function onUp() {
+      if (!resizingRef.current) return;
+      resizingRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [leftW, rightW]);
+
+  function startResize(side: "left" | "right") {
+    resizingRef.current = side;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }
   const [loadedPaper, setLoadedPaper] = useState<LoadedPaper | null>(null);
   const [recentPapers, setRecentPapers] = useState<LoadedPaper[]>([]);
 
@@ -504,7 +559,10 @@ export default function Home() {
 
   return (
     <div className="flex flex-1 h-screen bg-zinc-50 text-zinc-900">
-      <aside className="w-1/5 min-w-60 border-r border-zinc-200 bg-white flex flex-col">
+      <aside
+        style={{ width: leftW }}
+        className="shrink-0 border-r border-zinc-200 bg-white flex flex-col overflow-hidden"
+      >
         <div className="p-4 border-b border-zinc-200">
           <h2 className="text-sm font-semibold text-zinc-500 uppercase tracking-wide mb-3">
             논문 검색
@@ -638,7 +696,13 @@ export default function Home() {
         </div>
       </aside>
 
-      <main className="flex-1 flex flex-col bg-white border-r border-zinc-200 overflow-hidden">
+      <div
+        onMouseDown={() => startResize("left")}
+        className="w-1.5 shrink-0 cursor-col-resize bg-zinc-200 hover:bg-blue-400 active:bg-blue-500 transition-colors"
+        title="드래그하여 너비 조절"
+      />
+
+      <main className="flex-1 min-w-0 flex flex-col bg-white overflow-hidden">
         <div className="p-6 border-b border-zinc-200">
           <h2 className="text-sm font-semibold text-zinc-500 uppercase tracking-wide">
             논문 요약
@@ -743,7 +807,16 @@ export default function Home() {
         </div>
       </main>
 
-      <aside className="w-[30%] min-w-90 bg-white flex flex-col">
+      <div
+        onMouseDown={() => startResize("right")}
+        className="w-1.5 shrink-0 cursor-col-resize bg-zinc-200 hover:bg-blue-400 active:bg-blue-500 transition-colors"
+        title="드래그하여 너비 조절"
+      />
+
+      <aside
+        style={{ width: rightW }}
+        className="shrink-0 border-l border-zinc-200 bg-white flex flex-col overflow-hidden"
+      >
         <div className="border-b border-zinc-200">
           <div className="flex overflow-x-auto scrollbar-none">
             {(

@@ -1,6 +1,12 @@
 "use client";
 
-import type { GraphicalAbstract as GAData, GAOutcome } from "../api/visualize/route";
+import type {
+  GraphicalAbstract as GAData,
+  GAOutcome,
+  GANode,
+  GAEdge,
+  GAPathway,
+} from "../api/visualize/route";
 
 const TONE: Record<
   GAOutcome["direction"],
@@ -101,6 +107,77 @@ function OutcomeCard({ o }: { o: GAOutcome }) {
   );
 }
 
+const NODE_STYLE: Record<GANode["kind"], string> = {
+  molecule: "border-indigo-200 bg-indigo-50 text-indigo-900",
+  process: "border-amber-200 bg-amber-50 text-amber-900",
+  phenotype: "border-rose-200 bg-rose-50 text-rose-900",
+};
+
+function PathwayConnector({ effect, label }: { effect: GAEdge["effect"]; label: string }) {
+  const inhibit = effect === "inhibit";
+  const color = inhibit ? "#e11d48" : effect === "activate" ? "#059669" : "#a1a1aa";
+  const word = label || (inhibit ? "억제" : effect === "activate" ? "활성" : "");
+  return (
+    <div className="flex items-center justify-center gap-1.5 py-0.5">
+      <svg width="22" height="26" viewBox="0 0 22 26" aria-hidden>
+        <line x1="11" y1="0" x2="11" y2={inhibit ? 20 : 17} stroke={color} strokeWidth="2" />
+        {inhibit ? (
+          <line x1="4" y1="21" x2="18" y2="21" stroke={color} strokeWidth="2.5" strokeLinecap="round" />
+        ) : (
+          <path d="M6 16 L11 24 L16 16" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        )}
+      </svg>
+      {word && (
+        <span className="text-[11px] font-medium" style={{ color }}>
+          {word}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function PathwayDiagram({ pathway }: { pathway: GAPathway }) {
+  const { nodes, edges } = pathway;
+  if (!nodes || nodes.length === 0) return null;
+
+  const edgeBetween = (a: GANode, b: GANode): GAEdge =>
+    edges.find((e) => e.from === a.id && e.to === b.id) ??
+    edges.find((e) => e.from === b.id && e.to === a.id) ?? {
+      from: a.id,
+      to: b.id,
+      effect: "lead",
+      label: "",
+    };
+
+  return (
+    <div className="rounded-xl border border-zinc-200 bg-white p-3">
+      <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+        핵심 기전
+      </div>
+      <div className="flex flex-col items-stretch">
+        {nodes.map((n, i) => (
+          <div key={n.id || i}>
+            <div
+              className={`rounded-lg border px-3 py-2 text-center text-sm font-semibold ${
+                NODE_STYLE[n.kind] ?? NODE_STYLE.molecule
+              }`}
+            >
+              {n.label}
+            </div>
+            {i < nodes.length - 1 && (
+              <PathwayConnector {...edgeBetween(n, nodes[i + 1])} />
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="mt-2 flex gap-3 text-[10px] text-zinc-400">
+        <span>↓ 활성·귀결</span>
+        <span className="text-rose-500">⊣ 억제</span>
+      </div>
+    </div>
+  );
+}
+
 export default function GraphicalAbstract({ data }: { data: GAData }) {
   return (
     <div className="space-y-3">
@@ -113,6 +190,9 @@ export default function GraphicalAbstract({ data }: { data: GAData }) {
         )}
         <p className="text-base font-semibold leading-snug">{data.headline}</p>
       </div>
+
+      {/* 핵심 기전 도식 (기전 사슬이 있을 때만) */}
+      <PathwayDiagram pathway={data.pathway} />
 
       {/* 연구 설계 */}
       <div className="space-y-2">
