@@ -1439,11 +1439,11 @@ export default function Home() {
               </div>
             ) : loadedPaper.visualize ? (
               <div className="space-y-4">
-                {/* NEJM 스타일 이미지 — 제공자 선택형 (실험적) */}
+                {/* Graphical abstract 이미지 — 제공자 선택형 */}
                 <div className="rounded-xl border border-zinc-200 bg-white p-3">
                   <div className="flex items-center justify-between gap-2 mb-2">
                     <span className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
-                      NEJM 스타일 이미지 (실험적)
+                      Graphical Abstract (시각화 요약)
                     </span>
                     <button
                       onClick={() => handleGenerateImage(loadedPaper)}
@@ -1512,7 +1512,7 @@ export default function Home() {
                     </div>
                   ) : (
                     <p className="text-xs text-zinc-400 py-2">
-                      핵심 결과를 바탕으로 Gemini가 NEJM 스타일 이미지를 생성합니다. 위 버튼을 누르세요.
+                      핵심 결과를 바탕으로 graphical abstract(시각화 요약 자료)를 생성합니다. 제공자를 고르고 위 버튼을 누르세요.
                     </p>
                   )}
                 </div>

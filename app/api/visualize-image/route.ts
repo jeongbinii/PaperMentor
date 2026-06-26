@@ -5,7 +5,8 @@ import { NextResponse } from "next/server";
 const OPENAI_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
 const OPENAI_SIZE = process.env.OPENAI_IMAGE_SIZE || "1536x1024"; // 가로형 (graphical abstract)
 const OPENAI_QUALITY = process.env.OPENAI_IMAGE_QUALITY || "medium"; // low | medium | high
-const GEMINI_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
+// 한글 텍스트 품질이 좋은 상위 이미지 모델(Nano Banana Pro). 비용↑이나 결과물 차원이 다름.
+const GEMINI_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-3-pro-image";
 // Replicate 모델: flux(기본), ideogram(텍스트 특화). env로 교체 가능.
 const FLUX_MODEL = process.env.REPLICATE_MODEL || "black-forest-labs/flux-1.1-pro";
 const IDEOGRAM_MODEL =
@@ -44,7 +45,7 @@ function buildPrompt(body: {
 
   return `${paperText}
 
-이 내용을 시각화자료로 요약해봐. graphical abstract 형식으로. NEJM 을 참고해봐. 한글로 만들어.`;
+위 내용을 NEJM 논문의 graphical abstract처럼 한눈에 들어오는 시각화 요약 이미지를 한 장 생성해줘. 설명 말고 이미지를 직접 그려줘. 모든 라벨과 텍스트는 한글로.`;
 }
 
 // ── OpenAI gpt-image-1 ─────────────────────────────────────────────
