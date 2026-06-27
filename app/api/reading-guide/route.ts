@@ -10,6 +10,7 @@ export type GuideStep = {
   lookFor: string[];
   watchOut: string;
   helperTab: "background" | "translate" | "stats" | "reliability" | "quiz" | "";
+  anchor?: string; // 이 단계가 가리키는 원문 대표 문장(영어 verbatim). 없으면 ""
 };
 
 export type Positioning = {
@@ -44,6 +45,10 @@ const SYSTEM_PROMPT = `당신은 의대 저학년·논문 초심자에게 "논�
    - lookFor: 그 부분에서 독자가 직접 찾아야 할 구체적 단서·질문 2~3개. 이 논문의 실제 내용에 근거한 구체적 표현(예: "일차 평가변수가 무엇이고 본문 어디에 정의돼 있는지", "대조군이 위약인지 실제 약인지"). 막연한 말 금지.
    - watchOut: 이 단계에서 초심자가 흔히 놓치거나 오해하는 점 1문장. 없으면 빈 문자열.
    - helperTab: 이 단계에서 막히면 도움 되는 PaperMentor 탭. 정확히 다음 중 하나의 문자열만: "background"(배경 개념), "translate"(용어·번역), "stats"(통계 수치 해석), "reliability"(신뢰도), "quiz"(퀴즈), 또는 해당 없으면 ""(빈 문자열). 단계 성격에 맞게 고르되 억지로 채우지 말 것.
+   - anchor: 이 단계가 본문에서 가리키는 "대표 한 문장"을, 제공된 초록·본문 발췌에서 "원문 언어(영어) 그대로, 한 글자도 바꾸지 말고" 복사합니다. 독자가 그 문장을 클릭하면 원문의 해당 위치로 이동합니다.
+     · 반드시 제공된 텍스트(초록 또는 본문 발췌)에 "그대로 존재하는 연속된 부분 문자열"이어야 합니다. 번역·요약·짜깁기 금지.
+     · 그 단계가 가리키는 부분이 제공된 텍스트 안에 없으면(예: 그림·표 훑기, 또는 발췌에 없는 고찰 부분) 빈 문자열("")로 둡니다. 억지로 만들지 마십시오.
+     · 단서가 여럿이면 그 단계의 핵심을 가장 잘 대표하는 한 문장을 고릅니다(수치가 있으면 그 문장 우선).
 
 3) positioning: 이 연구의 치료/중재가 현재 임상에서 어떤 위치인지. 초심자가 가장 모호해하는 부분. 치료·약물·중재·예방 연구이면 반드시 채우고, 순수 기전연구·진단정확도·역학연구 등 "치료 포지셔닝"이 무의미하면 null로 둡니다.
    - intervention: 이 논문이 평가하는 중재(약물·시술·전략)가 무엇인지 한 줄.
@@ -67,7 +72,8 @@ const SYSTEM_PROMPT = `당신은 의대 저학년·논문 초심자에게 "논�
       "goal": "1문장",
       "lookFor": ["구체적 단서1", "구체적 단서2"],
       "watchOut": "1문장 또는 빈 문자열",
-      "helperTab": "background"
+      "helperTab": "background",
+      "anchor": "제공된 텍스트에서 원문 그대로 복사한 대표 문장 (없으면 빈 문자열)"
     }
   ],
   "positioning": {
@@ -95,6 +101,7 @@ function coerceStep(s: Partial<GuideStep>, idx: number): GuideStep {
       : [],
     watchOut: typeof s?.watchOut === "string" ? s.watchOut : "",
     helperTab: tab,
+    anchor: typeof s?.anchor === "string" ? s.anchor : "",
   };
 }
 
@@ -209,7 +216,7 @@ export async function POST(request: Request) {
 
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 6144,
+      max_tokens: 7680,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userContent }],
     });

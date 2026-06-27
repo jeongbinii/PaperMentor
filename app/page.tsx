@@ -1,8 +1,17 @@
 "use client";
 
 import { useState, useEffect, useRef, type ReactNode } from "react";
+import dynamic from "next/dynamic";
 import ReadingGuide from "./components/ReadingGuide";
 import FeatureTip from "./components/FeatureTip";
+
+// react-pdf는 브라우저 전용(pdf.js) → SSR 비활성화로 클라이언트에서만 로드
+const PdfViewer = dynamic(() => import("./components/PdfViewer"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex-1 p-6 text-xs text-zinc-400">PDF 준비 중…</div>
+  ),
+});
 
 const SOURCE_TIP_KEY = "pm_source_tip_seen";
 const WELCOME_KEY = "pm_welcome_seen";
@@ -111,6 +120,7 @@ type GuideStep = {
   lookFor: string[];
   watchOut: string;
   helperTab: "background" | "translate" | "stats" | "reliability" | "quiz" | "";
+  anchor?: string; // 단계가 가리키는 원문 대표 문장 (구버전 캐시 대비 optional)
 };
 
 type Positioning = {
@@ -1019,8 +1029,7 @@ export default function Home() {
     if (!source) return;
     setHighlight((prev) => (prev === source ? null : source));
     setSearchOpen(false);
-    // 형광펜은 텍스트 모드에서만 보이므로 PDF 모드면 텍스트로 전환
-    setOriginalView("text");
+    // 형광펜은 PDF·텍스트 양쪽 모드에서 동작하므로 현재 보기를 강제 전환하지 않는다
   }
 
   return (
@@ -1115,7 +1124,7 @@ export default function Home() {
                 <span>
                   <span className="font-semibold text-zinc-800">오른쪽 — 읽기 도구 탭</span>
                   <br />
-                  읽기 가이드 · 배경지식 · 의학용어 해석 · 통계 해석 · 퀴즈 · Q&A를 탭에서 볼 수 있어요.
+                  읽기 가이드 · 배경지식 · 통계 해석 · 퀴즈 · Q&A를 탭에서 볼 수 있어요.
                 </span>
               </li>
             )}
@@ -1358,11 +1367,7 @@ export default function Home() {
               </div>
 
               {loadedPaper.pdfUrl && originalView === "pdf" ? (
-                <iframe
-                  src={`${loadedPaper.pdfUrl}#navpanes=0&view=FitH`}
-                  title="논문 PDF 원본"
-                  className="flex-1 w-full border-0 bg-zinc-100"
-                />
+                <PdfViewer url={loadedPaper.pdfUrl} highlight={highlight} />
               ) : (
                 <div
                   className="flex-1 min-h-0 overflow-y-auto px-4 pb-4"
@@ -1712,11 +1717,10 @@ export default function Home() {
               [
                 { key: "guide", label: "읽기 가이드" },
                 { key: "background", label: "배경지식" },
-                { key: "translate", label: "의학용어 해석" },
                 { key: "stats", label: "통계 해석" },
                 { key: "quiz", label: "퀴즈" },
                 { key: "qa", label: "Q&A" },
-                // 시각화 → 중앙으로 이동, 신뢰도 → 일시 비활성화 (코드/탭 렌더는 아래 보존)
+                // 시각화 → 중앙으로 이동, 신뢰도·의학용어 해석 → 일시 비활성화 (코드/탭 렌더는 아래 보존)
               ] as { key: RightTab; label: string }[]
             ).map(({ key, label }) => (
               <button
@@ -2268,6 +2272,7 @@ export default function Home() {
               <ReadingGuide
                 data={loadedPaper.guide}
                 onOpenTab={(tab) => handleTabChange(tab as RightTab)}
+                onJump={(anchor) => toggleHighlight(anchor)}
               />
             ) : (
               <div className="text-center mt-8 space-y-3">

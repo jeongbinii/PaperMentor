@@ -32,16 +32,21 @@ PDF 본문을 읽고 지정된 형식으로 추출합니다.
 - journal: 저널/학술지명. 없으면 빈 문자열.
 - pubdate: 출판 연도 또는 날짜 (예: "2023" 또는 "2023 May"). 없으면 빈 문자열.
 - doi: DOI 문자열 (예: "10.1056/NEJMoa2034577"). 없으면 null.
-- methods: 논문 유형에 맞춰 "방법/접근"의 핵심을 본문 표현 그대로 발췌.
+- methods: 논문 유형에 맞춰 "방법/접근"의 핵심을 본문 문장 그대로 발췌.
   · 임상연구: 연구설계, 대상·표본수, 그리고 일차결과(primary outcome/endpoint)가 무엇으로 정의됐는지.
   · 기전/기초실험: 사용한 실험 모델(세포주·동물모델), 다룬 물질·유전자, 실험 접근법(어떤 표적·경로를 어떻게 평가했는지).
   · 리뷰: 리뷰가 다루는 범위·핵심 주제, 종합한 근거의 종류(전임상/임상 등).
   해당 정보가 없으면 빈 문자열.
-- results: 논문 유형에 맞춰 "핵심 결과/내용"을 본문 수치·명칭 그대로 발췌(핵심을 누락하지 마십시오).
+- results: 논문 유형에 맞춰 "핵심 결과/내용"을 본문 문장 그대로 발췌(핵심을 누락하지 마십시오).
   · 임상연구: 일차결과의 효과추정치(HR·RR·OR·effect size·mean difference 등)와 CI·p값.
   · 기전/기초실험: 핵심 분자·신호경로와 관찰된 효과(농도·용량과 방향성 등 본문 수치 포함).
   · 리뷰: 주제별 핵심 발견과 저자가 강조한 결론.
   없으면 빈 문자열.
+
+★ methods·results 언어 규칙(중요):
+  · methods와 results는 PDF 본문에 쓰인 "원문 언어(대개 영어) 그대로" 발췌합니다. 한국어로 번역·요약·의역하지 마십시오.
+  · 가능한 한 본문에 실재하는 연속된 문장을 그대로 복사합니다(독자가 PDF 원문에서 형광펜으로 찾을 수 있어야 함). 문장을 짜깁기하거나 새로 쓰지 마십시오.
+  · 라벨([Methods] 등)이나 한국어 설명 문장을 끼워넣지 말고, 영어 원문 발췌만 담습니다.
 - 어떤 유형이든 PDF에 명시되지 않은 정보를 추측하거나 생성하지 마십시오. 유형 라벨(임상/기전/리뷰)은 출력하지 말고 내용만 채웁니다.`;
 
 // structured outputs용 JSON 스키마 — Claude가 스키마에 맞는 유효한 JSON만 출력하도록 강제
@@ -166,11 +171,11 @@ export async function POST(request: Request) {
       );
     }
 
-    // Methods/Results 발췌를 분석 파이프라인용 본문(fullText)으로 결합
-    const fullText = [
-      extracted.methods ? `[Methods]\n${extracted.methods}` : "",
-      extracted.results ? `[Results]\n${extracted.results}` : "",
-    ]
+    // 발췌(방법·접근 / 핵심 결과)를 본문(fullText)으로 결합.
+    // 논문 유형에 따라 Methods/Results 구조가 아닐 수 있으므로 라벨을 붙이지 않고
+    // 영어 원문 구절을 그대로 이어 붙인다 (PDF 형광펜 매칭·표시 모두 원문 기준).
+    const fullText = [extracted.methods, extracted.results]
+      .map((s) => s.trim())
       .filter(Boolean)
       .join("\n\n");
 

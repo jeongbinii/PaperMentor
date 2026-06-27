@@ -72,11 +72,14 @@ function StepCard({
   step,
   isLast,
   onOpenTab,
+  onJump,
 }: {
   step: GuideStep;
   isLast: boolean;
   onOpenTab: (tab: string) => void;
+  onJump: (anchor: string) => void;
 }) {
+  const anchor = step.anchor ?? "";
   return (
     <div className="relative flex gap-3">
       {/* 타임라인 */}
@@ -113,14 +116,25 @@ function StepCard({
           </p>
         )}
 
-        {step.helperTab && (
-          <button
-            onClick={() => onOpenTab(step.helperTab)}
-            className="mt-2 inline-flex items-center gap-1 rounded-full bg-zinc-100 px-2.5 py-1 text-[11px] font-medium text-zinc-600 transition-colors hover:bg-blue-100 hover:text-blue-700"
-          >
-            막히면 → {TAB_LABEL[step.helperTab as Exclude<HelperTab, "">]} 탭
-          </button>
-        )}
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          {anchor && (
+            <button
+              onClick={() => onJump(anchor)}
+              title="이 단계가 가리키는 원문 위치로 이동해 형광펜으로 표시합니다"
+              className="inline-flex items-center gap-1 rounded-full bg-yellow-100 px-2.5 py-1 text-[11px] font-medium text-yellow-800 transition-colors hover:bg-yellow-200"
+            >
+              📍 본문에서 보기
+            </button>
+          )}
+          {step.helperTab && (
+            <button
+              onClick={() => onOpenTab(step.helperTab)}
+              className="inline-flex items-center gap-1 rounded-full bg-zinc-100 px-2.5 py-1 text-[11px] font-medium text-zinc-600 transition-colors hover:bg-blue-100 hover:text-blue-700"
+            >
+              막히면 → {TAB_LABEL[step.helperTab as Exclude<HelperTab, "">]} 탭
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -129,9 +143,11 @@ function StepCard({
 export default function ReadingGuide({
   data,
   onOpenTab,
+  onJump,
 }: {
   data: ReadingGuideResult;
   onOpenTab: (tab: string) => void;
+  onJump: (anchor: string) => void;
 }) {
   return (
     <div className="space-y-4">
@@ -161,6 +177,7 @@ export default function ReadingGuide({
                 step={step}
                 isLast={i === data.steps.length - 1}
                 onOpenTab={onOpenTab}
+                onJump={onJump}
               />
             ))}
           </div>
