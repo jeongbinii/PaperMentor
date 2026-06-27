@@ -15,6 +15,11 @@ const PdfViewer = dynamic(() => import("./components/PdfViewer"), {
 
 const SOURCE_TIP_KEY = "pm_source_tip_seen";
 const WELCOME_KEY = "pm_welcome_seen";
+const FONT_SCALE_KEY = "pm_font_scale";
+// 글자 크기(루트 폰트) 단계 — rem 기반 텍스트가 함께 커짐
+const FONT_MIN = 14;
+const FONT_MAX = 21;
+const FONT_DEFAULT = 16;
 
 // 우측 기능 패널 전체 마스터 스위치. 개별 탭은 위 탭 배열에서 가감한다.
 // (시각화 탭은 중앙으로 이동, 신뢰도 탭은 일시 비활성화 — 렌더 블록은 보존)
@@ -352,6 +357,8 @@ export default function Home() {
   const [showSourceTip, setShowSourceTip] = useState(false);
   // 사이트 첫 방문 사용 안내 팝업 (우상단 '사용 안내' 버튼으로 재호출 가능)
   const [showWelcome, setShowWelcome] = useState(false);
+  // 글자 크기(루트 폰트 px). 읽기 편의를 위해 헤더에서 조절, localStorage 유지
+  const [fontScale, setFontScale] = useState(FONT_DEFAULT);
 
   const [paperLoading, setPaperLoading] = useState(false);
   const [paperError, setPaperError] = useState<string | null>(null);
@@ -446,6 +453,26 @@ export default function Home() {
       // localStorage 불가 환경 무시
     }
   }, []);
+
+  // 글자 크기: 저장값 로드
+  useEffect(() => {
+    try {
+      const saved = Number(localStorage.getItem(FONT_SCALE_KEY));
+      if (saved >= FONT_MIN && saved <= FONT_MAX) setFontScale(saved);
+    } catch {
+      // 무시
+    }
+  }, []);
+
+  // 글자 크기: 루트 폰트에 적용 + 저장 (rem 기반 텍스트가 함께 커짐)
+  useEffect(() => {
+    document.documentElement.style.fontSize = `${fontScale}px`;
+    try {
+      localStorage.setItem(FONT_SCALE_KEY, String(fontScale));
+    } catch {
+      // 무시
+    }
+  }, [fontScale]);
 
   // 용어 해설 모드: data-explain 영역에서 텍스트 선택 시 해당 부분 해설 생성
   useEffect(() => {
@@ -1033,7 +1060,7 @@ export default function Home() {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-zinc-50 text-zinc-900">
+    <div className="flex flex-col h-screen overflow-hidden bg-slate-100 text-slate-800">
       {termTip && (
         <div
           className="pointer-events-none fixed z-50 w-64 -translate-x-1/2 rounded-lg border border-zinc-200 bg-white p-3 text-left shadow-xl"
@@ -1152,9 +1179,91 @@ export default function Home() {
           </p>
         </FeatureTip>
       )}
+
+      {/* ── 상단 브랜딩 헤더 ───────────────────────────────────── */}
+      <header className="shrink-0 z-20 flex items-center gap-3 border-b-2 border-blue-900/15 bg-white px-5 py-2.5">
+        <div className="flex items-center gap-3">
+          {/* PM 책 로고 */}
+          <svg
+            viewBox="0 0 44 44"
+            className="h-10 w-10 shrink-0"
+            aria-hidden
+          >
+            <defs>
+              <linearGradient id="pmGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#2dd4bf" />
+                <stop offset="48%" stopColor="#3b82f6" />
+                <stop offset="100%" stopColor="#1e3a8a" />
+              </linearGradient>
+            </defs>
+            {/* 펼친 책 — 좌/우 페이지 */}
+            <path
+              d="M22 12.5c-4-2.6-10-2.6-15-1v22c5-1.6 11-1.6 15 1z"
+              fill="url(#pmGrad)"
+            />
+            <path
+              d="M22 12.5c4-2.6 10-2.6 15-1v22c-5-1.6-11-1.6-15 1z"
+              fill="url(#pmGrad)"
+              opacity="0.88"
+            />
+            <line x1="22" y1="12.8" x2="22" y2="34.2" stroke="#fff" strokeWidth="1" opacity="0.45" />
+            {/* PM 모노그램 */}
+            <text x="14.2" y="27.5" textAnchor="middle" fontSize="11.5" fontWeight="800" fill="#fff">P</text>
+            <text x="29.8" y="27.5" textAnchor="middle" fontSize="11.5" fontWeight="800" fill="#fff">M</text>
+          </svg>
+          <div className="leading-tight">
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-[17px] font-extrabold tracking-tight text-[#1e3a8a]">
+                PAPERMENTOR
+              </span>
+              <span className="rounded bg-blue-50 px-1.5 py-px text-[10px] font-semibold text-blue-600">
+                beta
+              </span>
+            </div>
+            <div className="text-[11px] tracking-tight text-slate-400">
+              의학 논문 학습 지원 플랫폼
+            </div>
+          </div>
+        </div>
+
+        {/* 글자 크기 조절 */}
+        <div className="ml-auto flex items-center gap-2">
+          <span className="hidden text-[11px] text-slate-400 sm:inline">
+            글자 크기
+          </span>
+          <div className="flex items-center rounded-lg border border-slate-200 bg-white p-0.5">
+            <button
+              onClick={() => setFontScale((s) => Math.max(FONT_MIN, s - 1))}
+              disabled={fontScale <= FONT_MIN}
+              aria-label="글자 작게"
+              className="flex h-7 w-7 items-center justify-center rounded-md text-[15px] text-slate-500 transition-colors hover:bg-slate-100 disabled:opacity-30"
+            >
+              −
+            </button>
+            <button
+              onClick={() => setFontScale(FONT_DEFAULT)}
+              title="기본 크기로 되돌리기"
+              className="min-w-[44px] px-1 text-center text-[12px] font-medium tabular-nums text-slate-600 hover:text-blue-600"
+            >
+              {Math.round((fontScale / FONT_DEFAULT) * 100)}%
+            </button>
+            <button
+              onClick={() => setFontScale((s) => Math.min(FONT_MAX, s + 1))}
+              disabled={fontScale >= FONT_MAX}
+              aria-label="글자 크게"
+              className="flex h-7 w-7 items-center justify-center rounded-md text-[18px] text-slate-500 transition-colors hover:bg-slate-100 disabled:opacity-30"
+            >
+              +
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* ── 본문 3분할 ─────────────────────────────────────────── */}
+      <div className="flex flex-1 min-h-0 overflow-hidden">
       <aside
         style={{ width: leftW }}
-        className="shrink-0 border-r border-zinc-200 bg-white flex flex-col overflow-hidden min-h-0"
+        className="shrink-0 border-r border-slate-200 bg-slate-50 flex flex-col overflow-hidden min-h-0"
       >
         {/* 접이식: 논문 검색 · 최근 분석 (논문 로드 시 접힘) */}
         <div className="shrink-0 border-b border-zinc-200">
@@ -1421,7 +1530,7 @@ export default function Home() {
                       <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
                         초록 (Abstract)
                       </div>
-                      <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-zinc-700">
+                      <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-700">
                         {loadedPaper.paper.abstract
                           ? renderOriginal(loadedPaper.paper.abstract)
                           : "초록이 제공되지 않았습니다."}
@@ -1433,7 +1542,7 @@ export default function Home() {
                         <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
                           본문 발췌 (Full text)
                         </div>
-                        <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-zinc-700">
+                        <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-700">
                           {renderOriginal(loadedPaper.paper.fullText)}
                         </p>
                       </div>
@@ -1516,7 +1625,7 @@ export default function Home() {
             </div>
           )}
         </div>
-        <div className="flex-1 overflow-y-auto p-6" data-explain>
+        <div className="flex-1 overflow-y-auto bg-slate-50/60 p-6" data-explain>
           {explainMode && loadedPaper && (
             <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700">
               💬 용어 해설 모드 — 요약이나 왼쪽 원문에서 <b>모르는 단어·구절을 드래그</b>하면 그 부분 해설이 떠요.
@@ -1602,8 +1711,16 @@ export default function Home() {
               </section>
 
               {loadedPaper.summary.keyFindings?.length > 0 && (
-                <section>
-                  <h3 className="text-base font-semibold mb-2">핵심 결과</h3>
+                <section className="rounded-xl border border-blue-200/70 bg-blue-50/50 p-4">
+                  <div className="mb-3 flex items-center gap-2">
+                    <span className="h-4 w-1 rounded-full bg-blue-500" />
+                    <h3 className="text-[15px] font-semibold text-slate-900">
+                      핵심 결과
+                    </h3>
+                    <span className="text-[11px] text-slate-400">
+                      클릭하면 원문에 형광펜
+                    </span>
+                  </div>
                   <ul className="space-y-2">
                     {loadedPaper.summary.keyFindings.map((f, idx) => {
                       const active = !!f.source && highlight === f.source;
@@ -1615,12 +1732,12 @@ export default function Home() {
                             if (!window.getSelection()?.isCollapsed) return;
                             toggleHighlight(f.source);
                           }}
-                          className={`border-l-4 rounded-r-md p-3 transition-colors ${
+                          className={`rounded-lg border border-l-4 p-3 transition-colors ${
                             f.source ? "cursor-pointer" : ""
                           } ${
                             active
-                              ? "border-yellow-400 bg-yellow-50 ring-1 ring-yellow-300"
-                              : "border-blue-500 bg-blue-50/40 hover:bg-blue-50"
+                              ? "border-yellow-400 border-l-yellow-400 bg-yellow-50 ring-1 ring-yellow-300"
+                              : "border-slate-200 border-l-blue-500 bg-white hover:bg-blue-50/40"
                           }`}
                         >
                           <p className="text-sm font-semibold text-zinc-900 mb-1">
@@ -1650,27 +1767,31 @@ export default function Home() {
               <SummarySection
                 title="연구 배경"
                 body={loadedPaper.summary.background}
+                tone="sky"
                 render={renderSummaryText}
               />
               <SummarySection
                 title="연구 방법"
                 body={loadedPaper.summary.methods}
+                tone="teal"
                 render={renderSummaryText}
               />
               <SummarySection
                 title="주요 결과"
                 body={loadedPaper.summary.results}
+                tone="indigo"
                 render={renderSummaryText}
               />
               <SummarySection
                 title="결론"
                 body={loadedPaper.summary.conclusion}
+                tone="emerald"
                 render={renderSummaryText}
               />
               <SummarySection
                 title="핵심 메시지"
                 body={loadedPaper.summary.keyMessage}
-                accent
+                tone="amber"
                 render={renderSummaryText}
               />
             </div>
@@ -1709,10 +1830,10 @@ export default function Home() {
 
           <aside
             style={{ width: rightW }}
-            className="shrink-0 border-l border-zinc-200 bg-white flex flex-col overflow-hidden"
+            className="shrink-0 border-l border-slate-200 bg-slate-50 flex flex-col overflow-hidden"
           >
-        <div className="border-b border-zinc-200">
-          <div className="flex overflow-x-auto scrollbar-none">
+        <div className="border-b border-slate-200 bg-slate-50/60">
+          <div className="flex overflow-x-auto scrollbar-none px-1.5 pt-1.5">
             {(
               [
                 { key: "guide", label: "읽기 가이드" },
@@ -1727,10 +1848,10 @@ export default function Home() {
                 key={key}
                 onClick={() => handleTabChange(key)}
                 disabled={!loadedPaper}
-                className={`shrink-0 px-3 py-3 text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                className={`shrink-0 rounded-t-lg px-3.5 py-2.5 text-[13px] font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
                   activeTab === key
-                    ? "text-blue-600 border-b-2 border-blue-600"
-                    : "text-zinc-500 hover:text-zinc-700"
+                    ? "bg-white text-blue-600 shadow-[0_-2px_0_inset_rgba(37,99,235,1)]"
+                    : "text-slate-500 hover:bg-white/60 hover:text-slate-700"
                 }`}
               >
                 {label}
@@ -1743,7 +1864,7 @@ export default function Home() {
           <div className="flex-1 flex flex-col overflow-hidden">
             <div className="flex-1 overflow-y-auto p-4 space-y-3">
               {chatHistory.length === 0 && !error && (
-                <div className="text-center text-sm text-zinc-400 mt-8">
+                <div className="text-center text-sm text-slate-400 mt-14 px-6">
                   {loadedPaper ? (
                     <>
                       <p className="mb-2 font-medium text-zinc-500">논문 QA</p>
@@ -1826,14 +1947,14 @@ export default function Home() {
         {activeTab === "stats" && (
           <div className="flex-1 overflow-y-auto p-4">
             {!loadedPaper ? (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 <p>통계 해석 탭</p>
                 <p className="text-xs mt-2">
                   좌측에서 논문을 먼저 분석하세요
                 </p>
               </div>
             ) : statsLoading ? (
-              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6 animate-pulse">
                 통계 수치 해석 중입니다...
               </div>
             ) : statsError ? (
@@ -1858,7 +1979,7 @@ export default function Home() {
                       {loadedPaper.statistics.items.map((item, idx) => (
                         <li
                           key={`${item.metric}-${idx}`}
-                          className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60"
+                          className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
                         >
                           <div className="flex items-baseline gap-2 flex-wrap mb-2">
                             <span
@@ -1918,7 +2039,7 @@ export default function Home() {
                 )}
               </div>
             ) : (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 통계 해석을 불러오는 중...
               </div>
             )}
@@ -1928,14 +2049,14 @@ export default function Home() {
         {activeTab === "translate" && (
           <div className="flex-1 overflow-y-auto p-4">
             {!loadedPaper ? (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 <p>의학용어 해석 탭</p>
                 <p className="text-xs mt-2">
                   좌측에서 논문을 먼저 분석하세요
                 </p>
               </div>
             ) : translateLoading ? (
-              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6 animate-pulse">
                 의학용어 해석을 준비 중입니다...
               </div>
             ) : translateError ? (
@@ -1969,7 +2090,7 @@ export default function Home() {
                       {loadedPaper.translation.terms.map((term, idx) => (
                         <li
                           key={`${term.english}-${idx}`}
-                          className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60"
+                          className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
                         >
                           <div className="flex items-baseline gap-2 flex-wrap mb-1">
                             <span className="font-semibold text-sm text-zinc-900">
@@ -1998,7 +2119,7 @@ export default function Home() {
                 )}
               </div>
             ) : (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 의학용어 해석을 불러오는 중...
               </div>
             )}
@@ -2008,14 +2129,14 @@ export default function Home() {
         {activeTab === "background" && (
           <div className="flex-1 overflow-y-auto p-4">
             {!loadedPaper ? (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 <p>배경지식 탭</p>
                 <p className="text-xs mt-2">
                   좌측에서 논문을 먼저 분석하세요
                 </p>
               </div>
             ) : backgroundLoading ? (
-              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6 animate-pulse">
                 논문을 읽기 위한 배경지식을 정리하는 중입니다...
               </div>
             ) : backgroundError ? (
@@ -2038,7 +2159,7 @@ export default function Home() {
                   {loadedPaper.background.cards.map((card, idx) => (
                     <section
                       key={`${card.concept}-${idx}`}
-                      className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60"
+                      className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
                     >
                       <h3 className="font-semibold text-sm text-zinc-900 mb-1">
                         {card.concept}
@@ -2054,12 +2175,12 @@ export default function Home() {
                   ))}
                 </div>
               ) : (
-                <div className="text-center text-sm text-zinc-400 mt-8">
+                <div className="text-center text-sm text-slate-400 mt-14 px-6">
                   생성된 배경지식 카드가 없습니다.
                 </div>
               )
             ) : (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 배경지식을 불러오는 중...
               </div>
             )}
@@ -2069,12 +2190,12 @@ export default function Home() {
         {activeTab === "reliability" && (
           <div className="flex-1 overflow-y-auto p-4">
             {!loadedPaper ? (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 <p>신뢰도 탭</p>
                 <p className="text-xs mt-2">좌측에서 논문을 먼저 분석하세요</p>
               </div>
             ) : reliabilityLoading ? (
-              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6 animate-pulse">
                 논문 신뢰도를 분석하는 중입니다...
               </div>
             ) : reliabilityError ? (
@@ -2094,7 +2215,7 @@ export default function Home() {
                   {loadedPaper.reliability.cards.map((card, idx) => (
                     <li
                       key={idx}
-                      className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60"
+                      className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
                     >
                       <div className="flex items-center gap-2 mb-2">
                         <span className="text-xs font-semibold text-zinc-500 uppercase tracking-wide">
@@ -2133,7 +2254,7 @@ export default function Home() {
                 )}
               </div>
             ) : (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 신뢰도 분석을 불러오는 중...
               </div>
             )}
@@ -2143,12 +2264,12 @@ export default function Home() {
         {activeTab === "quiz" && (
           <div className="flex-1 overflow-y-auto p-4">
             {!loadedPaper ? (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 <p>퀴즈 탭</p>
                 <p className="text-xs mt-2">좌측에서 논문을 먼저 분석하세요</p>
               </div>
             ) : quizLoading ? (
-              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6 animate-pulse">
                 논문 기반 퀴즈를 생성하는 중입니다...
               </div>
             ) : quizError ? (
@@ -2180,7 +2301,7 @@ export default function Home() {
                   return (
                     <section
                       key={qi}
-                      className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60 mb-3"
+                      className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm mb-3"
                     >
                       <p className="text-sm font-medium text-zinc-900 mb-3">
                         <span className="text-zinc-400 mr-1">Q{qi + 1}.</span>
@@ -2240,7 +2361,7 @@ export default function Home() {
                 })}
               </div>
             ) : (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 퀴즈를 불러오는 중...
               </div>
             )}
@@ -2249,12 +2370,12 @@ export default function Home() {
         {activeTab === "guide" && (
           <div className="flex-1 overflow-y-auto p-4">
             {!loadedPaper ? (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 <p>읽기 가이드 탭</p>
                 <p className="text-xs mt-2">좌측에서 논문을 먼저 분석하세요</p>
               </div>
             ) : guideLoading ? (
-              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6 animate-pulse">
                 읽기 가이드를 생성하는 중입니다...
               </div>
             ) : guideError ? (
@@ -2294,7 +2415,7 @@ export default function Home() {
         {activeTab === "visualize" && (
           <div className="flex-1 overflow-y-auto p-4">
             {!loadedPaper ? (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 <p>시각화 탭</p>
                 <p className="text-xs mt-2">좌측에서 논문을 먼저 분석하세요</p>
               </div>
@@ -2387,31 +2508,42 @@ export default function Home() {
           </aside>
         </>
       )}
+      </div>
     </div>
   );
 }
 
+// 섹션별 차분한 색 톤 (단조로움 방지 — 쿨톤 스윕 + 따뜻한 강조)
+const SECTION_TONES = {
+  blue: { wrap: "border-blue-200/70 bg-blue-50/50", bar: "bg-blue-500" },
+  sky: { wrap: "border-sky-200/70 bg-sky-50/50", bar: "bg-sky-500" },
+  teal: { wrap: "border-teal-200/70 bg-teal-50/50", bar: "bg-teal-500" },
+  indigo: { wrap: "border-indigo-200/70 bg-indigo-50/50", bar: "bg-indigo-500" },
+  emerald: { wrap: "border-emerald-200/70 bg-emerald-50/50", bar: "bg-emerald-500" },
+  amber: { wrap: "border-amber-200/70 bg-amber-50/60", bar: "bg-amber-500" },
+} as const;
+
+type SectionTone = keyof typeof SECTION_TONES;
+
 function SummarySection({
   title,
   body,
-  accent,
+  tone = "blue",
   render,
 }: {
   title: string;
   body: string;
-  accent?: boolean;
+  tone?: SectionTone;
   render?: (text: string) => ReactNode;
 }) {
+  const t = SECTION_TONES[tone];
   return (
-    <section
-      className={
-        accent
-          ? "border-l-4 border-blue-500 bg-blue-50/40 rounded-r-md p-4"
-          : undefined
-      }
-    >
-      <h3 className="text-base font-semibold mb-2">{title}</h3>
-      <p className="text-zinc-700 leading-relaxed text-sm whitespace-pre-wrap">
+    <section className={`rounded-xl border p-4 ${t.wrap}`}>
+      <div className="mb-2 flex items-center gap-2">
+        <span className={`h-4 w-1 rounded-full ${t.bar}`} />
+        <h3 className="text-[15px] font-semibold text-slate-900">{title}</h3>
+      </div>
+      <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-700">
         {body ? (render ? render(body) : body) : "본문에 명시되어 있지 않습니다."}
       </p>
     </section>
