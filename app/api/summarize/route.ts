@@ -64,6 +64,54 @@ const SYSTEM_PROMPT = `당신은 의학 논문 학습을 돕는 한국어 AI 튜
   "keyMessage": "결론과 중복되지 않도록, 의대생이 이 논문 한 줄로 기억할 take-home 1~2문장. 결론이 '무엇이 밝혀졌나'라면 핵심 메시지는 '그래서 학습자가 어떻게 받아들여야 하나."
 }`;
 
+function tryParse(s: string): unknown | undefined {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return undefined;
+  }
+}
+
+// 응답이 max_tokens 등으로 잘려 JSON이 미완성일 때, 열린 괄호/문자열을 닫아 복구한다.
+function balanceAndClose(s: string): string {
+  let inStr = false;
+  let esc = false;
+  const stack: string[] = [];
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    out += c;
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{") stack.push("}");
+    else if (c === "[") stack.push("]");
+    else if (c === "}" || c === "]") stack.pop();
+  }
+  if (inStr) out += '"';
+  out = out.replace(/[,:\s]+$/, "");
+  while (stack.length) out += stack.pop();
+  return out;
+}
+
+function looseParse(slice: string): unknown | undefined {
+  const direct = tryParse(slice);
+  if (direct !== undefined) return direct;
+  const balanced = tryParse(balanceAndClose(slice));
+  if (balanced !== undefined) return balanced;
+  let end = slice.lastIndexOf("}");
+  while (end > 0) {
+    const cand = tryParse(balanceAndClose(slice.slice(0, end + 1)));
+    if (cand !== undefined) return cand;
+    end = slice.lastIndexOf("}", end - 1);
+  }
+  return undefined;
+}
+
 function extractJson(text: string): StructuredSummary {
   const trimmed = text.trim();
   const start = trimmed.indexOf("{");
@@ -72,7 +120,7 @@ function extractJson(text: string): StructuredSummary {
     throw new Error("Claude 응답에서 JSON을 찾지 못했습니다.");
   }
   const slice = trimmed.slice(start, end + 1);
-  const parsed = JSON.parse(slice) as Partial<StructuredSummary>;
+  const parsed = (looseParse(slice) ?? {}) as Partial<StructuredSummary>;
   return {
     keyFindings: Array.isArray(parsed.keyFindings)
       ? parsed.keyFindings
@@ -117,7 +165,7 @@ export async function POST(request: Request) {
 
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 3072,
+      max_tokens: 5120,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userContent }],
     });
