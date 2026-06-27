@@ -34,31 +34,61 @@ function canonNeedle(needle: string): string {
   return canonicalize(needle).canon;
 }
 
-// haystack 원본 좌표 기준 {start, end} 반환 (없으면 null)
-function findInText(
+// [2순위] haystack에서 needle의 "연속된 조각"을 찾아 원본 좌표 {start,end} 반환.
+// 전체 문장이 안 맞아도, 문장 중간의 한 구절이 그대로 있으면 거기를 잡는다.
+// 긴 조각부터 시도해 가능한 한 넓게 형광펜이 찍히도록 한다. (없으면 null)
+function findFragment(
   haystack: string,
   needle: string,
 ): { start: number; end: number } | null {
   if (!haystack || !needle) return null;
   const H = canonicalize(haystack);
   const n = canonNeedle(needle);
-  if (n.length < 8) return null;
+  if (n.length < 16) return null;
 
-  // 전체 → 점점 짧은 접두부 순으로 시도 (발췌가 살짝 다듬어졌어도 잡히도록)
-  const lengths = [n.length, 80, 48, 24].filter(
-    (L, idx, arr) => L <= n.length && arr.indexOf(L) === idx,
-  );
+  const lengths = Array.from(
+    new Set(
+      [
+        n.length,
+        Math.floor(n.length * 0.7),
+        Math.floor(n.length * 0.45),
+        40,
+        28,
+      ].map((L) => Math.min(L, n.length)),
+    ),
+  ).sort((a, b) => b - a); // 긴 조각 우선
   for (const L of lengths) {
-    if (L < 16) break;
-    const probe = n.slice(0, L);
-    const ci = H.canon.indexOf(probe);
-    if (ci !== -1) {
-      const start = H.map[ci];
-      const end = H.map[ci + probe.length - 1] + 1;
-      return { start, end };
+    if (L < 16) continue;
+    for (let off = 0; off + L <= n.length; off += 12) {
+      const probe = n.slice(off, off + L);
+      const ci = H.canon.indexOf(probe);
+      if (ci !== -1) {
+        const start = H.map[ci];
+        const end = H.map[ci + probe.length - 1] + 1;
+        return { start, end };
+      }
     }
   }
   return null;
+}
+
+// [3순위] 정확히 못 찾을 때를 위해, needle의 대표 단어들을 뽑는다(4자 이상, 영숫자).
+function anchorWords(needle: string): string[] {
+  const seen = new Set<string>();
+  for (const raw of needle.split(/[^A-Za-z0-9]+/)) {
+    const w = canonNeedle(raw);
+    if (w.length >= 4) seen.add(w);
+  }
+  return [...seen];
+}
+
+// 한 페이지에 needle 단어가 몇 개나 등장하는지 (페이지 추정용 점수)
+function pageOverlapScore(haystack: string, words: string[]): number {
+  if (words.length === 0) return 0;
+  const c = canonicalize(haystack).canon;
+  let hit = 0;
+  for (const w of words) if (c.includes(w)) hit++;
+  return hit;
 }
 
 function escapeHtml(s: string): string {
@@ -149,6 +179,7 @@ export default function PdfViewer({ url, highlight }: Props) {
     {},
   );
   const [notFound, setNotFound] = useState(false);
+  const [approx, setApprox] = useState(false); // 정확 위치는 못 잡고 페이지로만 이동
 
   const pdfRef = useRef<pdfjs.PDFDocumentProxy | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -198,19 +229,23 @@ export default function PdfViewer({ url, highlight }: Props) {
     return rec;
   }, []);
 
-  // highlight(원문 문장)가 바뀌면 페이지를 훑어 위치를 찾는다
+  // highlight(원문 문장)가 바뀌면 단계적으로 위치를 찾는다.
+  //  1·2순위: 문장(또는 조각)을 페이지에서 찾아 형광펜 + 스크롤
+  //  3순위: 못 찾으면 단어 겹침이 가장 많은 페이지로 스크롤만 (대략 위치)
   useEffect(() => {
     let cancelled = false;
     setHlPage(null);
     setHlRanges({});
     setNotFound(false);
+    setApprox(false);
     if (!highlight || !pdfRef.current || !numPages) return;
 
     (async () => {
+      // 1·2순위 — 문장/조각 형광펜
       for (let n = 1; n <= numPages; n++) {
         const { itemOffsets, concat } = await getPageText(n);
         if (cancelled) return;
-        const m = findInText(concat, highlight);
+        const m = findFragment(concat, highlight);
         if (m) {
           const ranges: Record<number, [number, number][]> = {};
           for (const { i, s, e } of itemOffsets) {
@@ -221,11 +256,35 @@ export default function PdfViewer({ url, highlight }: Props) {
           if (!cancelled) {
             setHlPage(n);
             setHlRanges(ranges);
+            setApprox(false);
           }
           return;
         }
       }
-      if (!cancelled) setNotFound(true);
+
+      // 3순위 — 단어 겹침이 가장 많은 페이지로 이동만
+      const words = anchorWords(highlight);
+      let bestPage = -1;
+      let bestScore = 0;
+      for (let n = 1; n <= numPages; n++) {
+        const { concat } = await getPageText(n);
+        if (cancelled) return;
+        const score = pageOverlapScore(concat, words);
+        if (score > bestScore) {
+          bestScore = score;
+          bestPage = n;
+        }
+      }
+      const threshold = Math.max(3, Math.ceil(words.length * 0.3));
+      if (!cancelled) {
+        if (bestPage !== -1 && bestScore >= threshold) {
+          setHlPage(bestPage);
+          setHlRanges({});
+          setApprox(true);
+        } else {
+          setNotFound(true);
+        }
+      }
     })();
 
     return () => {
@@ -271,6 +330,11 @@ export default function PdfViewer({ url, highlight }: Props) {
       {notFound && (
         <div className="sticky top-0 z-10 bg-amber-50/95 px-3 py-1.5 text-[11px] text-amber-700 shadow-sm">
           이 문장을 PDF 원문에서 찾지 못했어요. 📝 텍스트 모드에서 확인해 보세요.
+        </div>
+      )}
+      {approx && (
+        <div className="sticky top-0 z-10 bg-blue-50/95 px-3 py-1.5 text-[11px] text-blue-700 shadow-sm">
+          정확한 문장을 못 집어서, 관련 내용이 가장 많은 페이지로 이동했어요. 이 근처를 살펴보세요.
         </div>
       )}
 
