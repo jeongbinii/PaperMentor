@@ -1,19 +1,36 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef, type ReactNode } from "react";
 import dynamic from "next/dynamic";
+import ReadingGuide from "./components/ReadingGuide";
+import FeatureTip from "./components/FeatureTip";
 
-const MermaidDiagram = dynamic(
-  () => import("./components/MermaidDiagram"),
-  { ssr: false },
-);
+// react-pdf는 브라우저 전용(pdf.js) → SSR 비활성화로 클라이언트에서만 로드
+const PdfViewer = dynamic(() => import("./components/PdfViewer"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex-1 p-6 text-xs text-zinc-400">PDF 준비 중…</div>
+  ),
+});
+
+const SOURCE_TIP_KEY = "pm_source_tip_seen";
+const WELCOME_KEY = "pm_welcome_seen";
+const FONT_SCALE_KEY = "pm_font_scale";
+// 글자 크기(루트 폰트) 단계 — rem 기반 텍스트가 함께 커짐
+const FONT_MIN = 14;
+const FONT_MAX = 21;
+const FONT_DEFAULT = 16;
+
+// 우측 기능 패널 전체 마스터 스위치. 개별 탭은 위 탭 배열에서 가감한다.
+// (시각화 탭은 중앙으로 이동, 신뢰도 탭은 일시 비활성화 — 렌더 블록은 보존)
+const SHOW_RIGHT_PANEL = true;
 
 type ChatMessage = {
   role: "user" | "assistant";
   text: string;
 };
 
-type RightTab = "background" | "translate" | "stats" | "qa" | "reliability" | "quiz" | "visualize";
+type RightTab = "guide" | "background" | "translate" | "stats" | "qa" | "reliability" | "quiz" | "visualize";
 
 type PubMedPaper = {
   pmid: string;
@@ -29,6 +46,7 @@ type PubMedPaper = {
 type KeyFinding = {
   claim: string;
   evidence: string;
+  source?: string;
 };
 
 type StructuredSummary = {
@@ -100,9 +118,28 @@ type QuizResult = {
   questions: QuizQuestion[];
 };
 
-type VisualizeResult = {
-  mermaid: string;
-  description: string;
+type GuideStep = {
+  order: number;
+  section: string;
+  goal: string;
+  lookFor: string[];
+  watchOut: string;
+  helperTab: "background" | "translate" | "stats" | "reliability" | "quiz" | "";
+  anchor?: string; // 단계가 가리키는 원문 대표 문장 (구버전 캐시 대비 optional)
+};
+
+type Positioning = {
+  intervention: string;
+  lineOfTherapy: string;
+  status: string;
+  comparator: string;
+  clinicalContext: string;
+};
+
+type ReadingGuideResult = {
+  firstReadFocus: string;
+  steps: GuideStep[];
+  positioning: Positioning | null;
 };
 
 type LoadedPaper = {
@@ -113,17 +150,386 @@ type LoadedPaper = {
   background?: BackgroundResult;
   reliability?: ReliabilityResult;
   quiz?: QuizResult;
-  visualize?: VisualizeResult;
+  guide?: ReadingGuideResult;
+  geminiImage?: string;
+  pdfUrl?: string; // 업로드한 PDF의 object URL (좌측 원본 임베드용)
 };
+
+// 공백/줄바꿈 차이를 무시하고 원문에서 발췌문 위치를 찾는다.
+// 모델이 준 source가 원문과 띄어쓰기·개행만 다른 경우에도 매칭되도록 정규화 후 인덱스를 역매핑한다.
+function normalizeWithMap(s: string): { norm: string; map: number[] } {
+  let norm = "";
+  const map: number[] = [];
+  let prevSpace = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (/\s/.test(ch)) {
+      if (!prevSpace) {
+        norm += " ";
+        map.push(i);
+        prevSpace = true;
+      }
+    } else {
+      norm += ch;
+      map.push(i);
+      prevSpace = false;
+    }
+  }
+  return { norm, map };
+}
+
+function findInText(
+  haystack: string,
+  needle: string,
+): { start: number; end: number } | null {
+  if (!haystack || !needle) return null;
+  const exact = haystack.indexOf(needle);
+  if (exact !== -1) return { start: exact, end: exact + needle.length };
+
+  const H = normalizeWithMap(haystack);
+  const hNorm = H.norm.toLowerCase();
+  const nNorm = needle.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!nNorm) return null;
+
+  let idx = hNorm.indexOf(nNorm);
+  let matchLen = nNorm.length;
+  if (idx === -1) {
+    // 끝부분이 조금 달라도 잡히도록 앞부분(최대 50자)으로 재시도
+    const prefix = nNorm.slice(0, 50);
+    if (prefix.length >= 12) idx = hNorm.indexOf(prefix);
+    if (idx === -1) return null;
+    matchLen = prefix.length;
+  }
+  const start = H.map[idx];
+  const endIdx = Math.min(idx + matchLen - 1, H.map.length - 1);
+  const end = H.map[endIdx] + 1;
+  return { start, end };
+}
+
+// ── 의학용어 인라인 호버 ────────────────────────────────────────────
+type TermHit = { start: number; end: number; term: MedicalTerm };
+type TipHandler = (term: MedicalTerm | null, el: HTMLElement | null) => void;
+
+// 텍스트에서 용어(영어·한글 표기)의 모든 등장 위치를 찾아 겹치지 않게 반환
+function termHits(text: string, terms: MedicalTerm[]): TermHit[] {
+  const hits: TermHit[] = [];
+  const lower = text.toLowerCase();
+  for (const term of terms) {
+    for (const variant of [term.english, term.korean]) {
+      if (!variant || variant.length < 2) continue;
+      const v = variant.toLowerCase();
+      let from = 0;
+      let idx = lower.indexOf(v, from);
+      while (idx !== -1) {
+        hits.push({ start: idx, end: idx + variant.length, term });
+        from = idx + variant.length;
+        idx = lower.indexOf(v, from);
+      }
+    }
+  }
+  hits.sort(
+    (a, b) => a.start - b.start || b.end - b.start - (a.end - a.start),
+  );
+  const out: TermHit[] = [];
+  let lastEnd = -1;
+  for (const h of hits) {
+    if (h.start >= lastEnd) {
+      out.push(h);
+      lastEnd = h.end;
+    }
+  }
+  return out;
+}
+
+function TermSpan({
+  term,
+  highlighted,
+  onTip,
+  children,
+}: {
+  term: MedicalTerm;
+  highlighted: boolean;
+  onTip: TipHandler;
+  children: ReactNode;
+}) {
+  return (
+    <span
+      className={`cursor-help underline decoration-dotted decoration-1 decoration-sky-400 underline-offset-2 ${
+        highlighted ? "rounded bg-yellow-200 text-zinc-900" : ""
+      }`}
+      onMouseEnter={(e) => onTip(term, e.currentTarget)}
+      onMouseLeave={() => onTip(null, null)}
+    >
+      {children}
+    </span>
+  );
+}
+
+// 원문/요약 텍스트를 렌더하며 (1) 용어 호버 (2) 형광펜 강조를 한 번에 처리
+function renderRich(
+  text: string,
+  opts: {
+    terms?: MedicalTerm[];
+    highlight?: string | null;
+    onTip?: TipHandler;
+    markRef?: { current: HTMLSpanElement | null };
+  },
+): ReactNode {
+  const { terms = [], highlight = null, onTip, markRef } = opts;
+  const hits = terms.length && onTip ? termHits(text, terms) : [];
+  const hl = highlight ? findInText(text, highlight) : null;
+  if (!hits.length && !hl) return text;
+
+  const cuts = new Set<number>([0, text.length]);
+  if (hl) {
+    cuts.add(hl.start);
+    cuts.add(hl.end);
+  }
+  for (const h of hits) {
+    cuts.add(h.start);
+    cuts.add(h.end);
+  }
+  const sorted = Array.from(cuts).sort((a, b) => a - b);
+
+  const nodes: ReactNode[] = [];
+  let anchored = false;
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const s = sorted[i];
+    const e = sorted[i + 1];
+    if (e <= s) continue;
+    const slice = text.slice(s, e);
+    const inHl = !!hl && s >= hl.start && e <= hl.end;
+    const hit = hits.find((h) => s >= h.start && e <= h.end);
+
+    if (inHl && !anchored && markRef) {
+      nodes.push(<span key={`a${s}`} ref={markRef} />);
+      anchored = true;
+    }
+    if (hit && onTip) {
+      nodes.push(
+        <TermSpan key={s} term={hit.term} highlighted={inHl} onTip={onTip}>
+          {slice}
+        </TermSpan>,
+      );
+    } else if (inHl) {
+      nodes.push(
+        <mark
+          key={s}
+          className="rounded bg-yellow-200 px-0.5 text-zinc-900 ring-1 ring-yellow-300"
+        >
+          {slice}
+        </mark>,
+      );
+    } else {
+      nodes.push(<span key={s}>{slice}</span>);
+    }
+  }
+  return <>{nodes}</>;
+}
 
 export default function Home() {
   const [searchQuery, setSearchQuery] = useState("");
-  const [activeTab, setActiveTab] = useState<RightTab>("background");
+  const [activeTab, setActiveTab] = useState<RightTab>("guide");
+  // 좌측 검색/최근 패널 펼침 여부 (논문 로드되면 접혀서 원문에 공간 양보)
+  const [searchOpen, setSearchOpen] = useState(true);
+  // 좌측 원본 보기 모드: PDF 업로드면 실제 PDF, 아니면 추출 텍스트
+  const [originalView, setOriginalView] = useState<"pdf" | "text">("text");
+  // 요약 → 원문 근거 형광펜: 현재 강조 중인 원문 발췌문
+  const [highlight, setHighlight] = useState<string | null>(null);
+  const markRef = useRef<HTMLSpanElement | null>(null);
+  // 의학용어 인라인 호버 툴팁 (화면 잘림 방지 위해 fixed 위치)
+  const [termTip, setTermTip] = useState<{
+    term: MedicalTerm;
+    x: number;
+    y: number;
+  } | null>(null);
+  // 용어 해설 모드: 켜면 요약·원문에서 텍스트를 드래그할 때 그 부분 해설을 즉석 생성
+  const [explainMode, setExplainMode] = useState(false);
+  const [explainPopup, setExplainPopup] = useState<{
+    x: number;
+    y: number;
+    term: string;
+    loading: boolean;
+    text: string;
+    error: string;
+  } | null>(null);
+  // 형광펜 기능 첫 사용 안내 팝업
+  const [showSourceTip, setShowSourceTip] = useState(false);
+  // 사이트 첫 방문 사용 안내 팝업 (우상단 '사용 안내' 버튼으로 재호출 가능)
+  const [showWelcome, setShowWelcome] = useState(false);
+  // 글자 크기(루트 폰트 px). 읽기 편의를 위해 헤더에서 조절, localStorage 유지
+  const [fontScale, setFontScale] = useState(FONT_DEFAULT);
 
   const [paperLoading, setPaperLoading] = useState(false);
   const [paperError, setPaperError] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+
+  // 3분할 패널 너비 (px) — 가운데(main)는 flex-1로 나머지 차지
+  const [leftW, setLeftW] = useState(360);
+  const [rightW, setRightW] = useState(440);
+  const resizingRef = useRef<null | "left" | "right">(null);
+  const leftWRef = useRef(leftW);
+  const rightWRef = useRef(rightW);
+  useEffect(() => {
+    leftWRef.current = leftW;
+    rightWRef.current = rightW;
+  });
+
+  // 창 크기에 맞춰 패널 너비 보정 (작은 창에서 가운데가 붕괴/가로스크롤 방지)
+  useEffect(() => {
+    function clampToViewport() {
+      const total = window.innerWidth;
+      const MIN_CENTER = 320;
+      const MIN_LEFT = 200;
+      const MIN_RIGHT = 300;
+      let r = rightWRef.current;
+      let l = leftWRef.current;
+      r = Math.max(MIN_RIGHT, Math.min(r, total - MIN_LEFT - MIN_CENTER));
+      l = Math.max(MIN_LEFT, Math.min(l, total - r - MIN_CENTER));
+      setLeftW(l);
+      setRightW(r);
+    }
+    clampToViewport();
+    window.addEventListener("resize", clampToViewport);
+    return () => window.removeEventListener("resize", clampToViewport);
+  }, []);
+
+  useEffect(() => {
+    const MIN_LEFT = 200;
+    const MIN_RIGHT = 320;
+    const MIN_CENTER = 360;
+    function onMove(e: MouseEvent) {
+      const side = resizingRef.current;
+      if (!side) return;
+      const total = window.innerWidth;
+      if (side === "left") {
+        const max = total - rightW - MIN_CENTER;
+        setLeftW(Math.max(MIN_LEFT, Math.min(e.clientX, max)));
+      } else {
+        const max = total - leftW - MIN_CENTER;
+        setRightW(Math.max(MIN_RIGHT, Math.min(total - e.clientX, max)));
+      }
+    }
+    function onUp() {
+      if (!resizingRef.current) return;
+      resizingRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [leftW, rightW]);
+
+  function startResize(side: "left" | "right") {
+    resizingRef.current = side;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }
   const [loadedPaper, setLoadedPaper] = useState<LoadedPaper | null>(null);
   const [recentPapers, setRecentPapers] = useState<LoadedPaper[]>([]);
+
+  // 논문이 바뀌면 형광펜 강조 해제 + 직전 논문의 이미지 오류 상태 초기화
+  useEffect(() => {
+    setHighlight(null);
+    setGeminiError(null);
+  }, [loadedPaper?.paper.pmid]);
+
+  // 강조가 바뀌면 좌측 원문의 해당 부분으로 스크롤
+  useEffect(() => {
+    if (highlight && markRef.current) {
+      markRef.current.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }, [highlight]);
+
+  // 첫 방문이면 사용 안내 팝업 자동 표시
+  useEffect(() => {
+    try {
+      if (!localStorage.getItem(WELCOME_KEY)) setShowWelcome(true);
+    } catch {
+      // localStorage 불가 환경 무시
+    }
+  }, []);
+
+  // 글자 크기: 저장값 로드
+  useEffect(() => {
+    try {
+      const saved = Number(localStorage.getItem(FONT_SCALE_KEY));
+      if (saved >= FONT_MIN && saved <= FONT_MAX) setFontScale(saved);
+    } catch {
+      // 무시
+    }
+  }, []);
+
+  // 글자 크기: 루트 폰트에 적용 + 저장 (rem 기반 텍스트가 함께 커짐)
+  useEffect(() => {
+    document.documentElement.style.fontSize = `${fontScale}px`;
+    try {
+      localStorage.setItem(FONT_SCALE_KEY, String(fontScale));
+    } catch {
+      // 무시
+    }
+  }, [fontScale]);
+
+  // 용어 해설 모드: data-explain 영역에서 텍스트 선택 시 해당 부분 해설 생성
+  useEffect(() => {
+    if (!explainMode) return;
+    async function onMouseUp() {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) {
+        setExplainPopup(null); // 빈 클릭이면 팝업 닫기
+        return;
+      }
+      const term = sel.toString().trim();
+      if (term.length < 2 || term.length > 120) return;
+      const node = sel.anchorNode;
+      const el = (node instanceof Element ? node : node?.parentElement) ?? null;
+      const region = el?.closest("[data-explain]");
+      if (!region) return;
+      const rect = sel.getRangeAt(0).getBoundingClientRect();
+      const block = el?.closest(
+        "[data-explain] p, [data-explain] li, [data-explain] article",
+      );
+      const context = (block?.textContent || region.textContent || "").slice(
+        0,
+        600,
+      );
+      const x = Math.min(
+        Math.max(rect.left + rect.width / 2, 160),
+        window.innerWidth - 160,
+      );
+      const y = rect.bottom + 8;
+      setExplainPopup({ x, y, term, loading: true, text: "", error: "" });
+      try {
+        const res = await fetch("/api/explain-term", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            term,
+            context,
+            title: loadedPaper?.paper.title,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "해설 생성에 실패했습니다.");
+        setExplainPopup((p) =>
+          p && p.term === term
+            ? { ...p, loading: false, text: data.explanation as string }
+            : p,
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "알 수 없는 오류";
+        setExplainPopup((p) =>
+          p && p.term === term ? { ...p, loading: false, error: msg } : p,
+        );
+      }
+    }
+    document.addEventListener("mouseup", onMouseUp);
+    return () => document.removeEventListener("mouseup", onMouseUp);
+  }, [explainMode, loadedPaper]);
 
   const [chatInput, setChatInput] = useState("");
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
@@ -146,11 +552,16 @@ export default function Home() {
   const [quizError, setQuizError] = useState<string | null>(null);
   const [quizAnswers, setQuizAnswers] = useState<Record<number, number>>({});
 
-  const [visualizeLoading, setVisualizeLoading] = useState(false);
-  const [visualizeError, setVisualizeError] = useState<string | null>(null);
+  const [guideLoading, setGuideLoading] = useState(false);
+  const [guideError, setGuideError] = useState<string | null>(null);
+  const [geminiLoading, setGeminiLoading] = useState(false);
+  const [geminiError, setGeminiError] = useState<string | null>(null);
+  const [imageProvider, setImageProvider] = useState<
+    "gemini" | "openai" | "flux" | "ideogram"
+  >("gemini");
 
   // 논문(메타+초록)을 받아 요약 생성 후 상태에 적재 — PMID/DOI 경로와 PDF 경로가 공유
-  async function summarizeAndLoad(paper: PubMedPaper) {
+  async function summarizeAndLoad(paper: PubMedPaper, pdfUrl?: string) {
     const summaryRes = await fetch("/api/summarize", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -168,15 +579,63 @@ export default function Home() {
     const loaded: LoadedPaper = {
       paper,
       summary: summaryData.summary as StructuredSummary,
+      pdfUrl,
     };
     setLoadedPaper(loaded);
     setChatHistory([]);
     setQuizAnswers({});
-    setActiveTab("background");
+    setActiveTab("guide");
+    setSearchOpen(false);
+    setOriginalView(pdfUrl ? "pdf" : "text");
     setRecentPapers((prev) => {
       const without = prev.filter((p) => p.paper.pmid !== paper.pmid);
       return [loaded, ...without].slice(0, 10);
     });
+
+    // 시각화 요약 이미지 자동 생성 (Gemini) — 사용자 요청 없이 분석 직후 생성
+    if (!loaded.geminiImage) {
+      handleGenerateImage(loaded, "gemini");
+    }
+    // 의학용어 사전 자동 생성 — 요약·원문 인라인 호버에 사용
+    if (!loaded.translation) {
+      handleTranslate(loaded);
+    }
+
+    // 형광펜(원문 근거) 기능 첫 사용 안내 — source가 있는 결과가 있고, 아직 안 봤을 때 1회
+    const hasSource = loaded.summary.keyFindings?.some((f) => f.source);
+    if (
+      hasSource &&
+      typeof window !== "undefined" &&
+      !localStorage.getItem(SOURCE_TIP_KEY)
+    ) {
+      setShowSourceTip(true);
+    }
+  }
+
+  function closeSourceTip() {
+    setShowSourceTip(false);
+  }
+
+  function neverShowSourceTip() {
+    try {
+      localStorage.setItem(SOURCE_TIP_KEY, "1");
+    } catch {
+      // localStorage 불가 환경 무시
+    }
+    setShowSourceTip(false);
+  }
+
+  function closeWelcome() {
+    setShowWelcome(false);
+  }
+
+  function neverShowWelcome() {
+    try {
+      localStorage.setItem(WELCOME_KEY, "1");
+    } catch {
+      // localStorage 불가 환경 무시
+    }
+    setShowWelcome(false);
   }
 
   async function handleAnalyzePaper(queryOverride?: string) {
@@ -219,12 +678,25 @@ export default function Home() {
       if (!pdfRes.ok) {
         throw new Error(pdfData.error ?? "PDF를 분석하지 못했습니다.");
       }
-      await summarizeAndLoad(pdfData.paper as PubMedPaper);
+      // 업로드한 PDF를 좌측 원본에 그대로 띄우기 위해 object URL 생성
+      const pdfUrl = URL.createObjectURL(file);
+      await summarizeAndLoad(pdfData.paper as PubMedPaper, pdfUrl);
     } catch (e) {
       setPaperError(e instanceof Error ? e.message : "알 수 없는 오류");
     } finally {
       setPaperLoading(false);
     }
+  }
+
+  function acceptPdfFile(file: File | undefined | null) {
+    if (!file) return;
+    const isPdf =
+      file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+    if (!isPdf) {
+      setPaperError("PDF 파일만 업로드할 수 있습니다.");
+      return;
+    }
+    handlePdfUpload(file);
   }
 
   async function handleTranslate(target: LoadedPaper) {
@@ -248,10 +720,15 @@ export default function Home() {
       }
 
       const translation = data.translation as TranslationResult;
-      const updated: LoadedPaper = { ...target, translation };
-      setLoadedPaper(updated);
+      setLoadedPaper((prev) =>
+        prev && prev.paper.pmid === target.paper.pmid
+          ? { ...prev, translation }
+          : prev,
+      );
       setRecentPapers((prev) =>
-        prev.map((p) => (p.paper.pmid === target.paper.pmid ? updated : p)),
+        prev.map((p) =>
+          p.paper.pmid === target.paper.pmid ? { ...p, translation } : p,
+        ),
       );
     } catch (e) {
       setTranslateError(e instanceof Error ? e.message : "알 수 없는 오류");
@@ -286,10 +763,15 @@ export default function Home() {
       }
 
       const statistics = data.statistics as StatisticsResult;
-      const updated: LoadedPaper = { ...target, statistics };
-      setLoadedPaper(updated);
+      setLoadedPaper((prev) =>
+        prev && prev.paper.pmid === target.paper.pmid
+          ? { ...prev, statistics }
+          : prev,
+      );
       setRecentPapers((prev) =>
-        prev.map((p) => (p.paper.pmid === target.paper.pmid ? updated : p)),
+        prev.map((p) =>
+          p.paper.pmid === target.paper.pmid ? { ...p, statistics } : p,
+        ),
       );
     } catch (e) {
       setStatsError(e instanceof Error ? e.message : "알 수 없는 오류");
@@ -320,10 +802,15 @@ export default function Home() {
       }
 
       const background = data.background as BackgroundResult;
-      const updated: LoadedPaper = { ...target, background };
-      setLoadedPaper(updated);
+      setLoadedPaper((prev) =>
+        prev && prev.paper.pmid === target.paper.pmid
+          ? { ...prev, background }
+          : prev,
+      );
       setRecentPapers((prev) =>
-        prev.map((p) => (p.paper.pmid === target.paper.pmid ? updated : p)),
+        prev.map((p) =>
+          p.paper.pmid === target.paper.pmid ? { ...p, background } : p,
+        ),
       );
     } catch (e) {
       setBackgroundError(e instanceof Error ? e.message : "알 수 없는 오류");
@@ -352,10 +839,15 @@ export default function Home() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "신뢰도 분석에 실패했습니다.");
       const reliability = data.reliability as ReliabilityResult;
-      const updated: LoadedPaper = { ...target, reliability };
-      setLoadedPaper(updated);
+      setLoadedPaper((prev) =>
+        prev && prev.paper.pmid === target.paper.pmid
+          ? { ...prev, reliability }
+          : prev,
+      );
       setRecentPapers((prev) =>
-        prev.map((p) => (p.paper.pmid === target.paper.pmid ? updated : p)),
+        prev.map((p) =>
+          p.paper.pmid === target.paper.pmid ? { ...p, reliability } : p,
+        ),
       );
     } catch (e) {
       setReliabilityError(e instanceof Error ? e.message : "알 수 없는 오류");
@@ -381,10 +873,13 @@ export default function Home() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "퀴즈 생성에 실패했습니다.");
       const quiz = data.quiz as QuizResult;
-      const updated: LoadedPaper = { ...target, quiz };
-      setLoadedPaper(updated);
+      setLoadedPaper((prev) =>
+        prev && prev.paper.pmid === target.paper.pmid ? { ...prev, quiz } : prev,
+      );
       setRecentPapers((prev) =>
-        prev.map((p) => (p.paper.pmid === target.paper.pmid ? updated : p)),
+        prev.map((p) =>
+          p.paper.pmid === target.paper.pmid ? { ...p, quiz } : p,
+        ),
       );
     } catch (e) {
       setQuizError(e instanceof Error ? e.message : "알 수 없는 오류");
@@ -393,12 +888,12 @@ export default function Home() {
     }
   }
 
-  async function handleVisualize(target: LoadedPaper) {
-    if (target.visualize || visualizeLoading) return;
-    setVisualizeLoading(true);
-    setVisualizeError(null);
+  async function handleGuide(target: LoadedPaper) {
+    if (target.guide || guideLoading) return;
+    setGuideLoading(true);
+    setGuideError(null);
     try {
-      const res = await fetch("/api/visualize", {
+      const res = await fetch("/api/reading-guide", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -408,17 +903,62 @@ export default function Home() {
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "시각화 생성에 실패했습니다.");
-      const visualize = data.visualize as VisualizeResult;
-      const updated: LoadedPaper = { ...target, visualize };
-      setLoadedPaper(updated);
+      if (!res.ok) throw new Error(data.error ?? "읽기 가이드 생성에 실패했습니다.");
+      const guide = data.guide as ReadingGuideResult;
+      setLoadedPaper((prev) =>
+        prev && prev.paper.pmid === target.paper.pmid
+          ? { ...prev, guide }
+          : prev,
+      );
       setRecentPapers((prev) =>
-        prev.map((p) => (p.paper.pmid === target.paper.pmid ? updated : p)),
+        prev.map((p) =>
+          p.paper.pmid === target.paper.pmid ? { ...p, guide } : p,
+        ),
       );
     } catch (e) {
-      setVisualizeError(e instanceof Error ? e.message : "알 수 없는 오류");
+      setGuideError(e instanceof Error ? e.message : "알 수 없는 오류");
     } finally {
-      setVisualizeLoading(false);
+      setGuideLoading(false);
+    }
+  }
+
+  async function handleGenerateImage(
+    target: LoadedPaper,
+    providerOverride?: "gemini" | "openai" | "flux" | "ideogram",
+  ) {
+    if (geminiLoading) return;
+    setGeminiLoading(true);
+    setGeminiError(null);
+    try {
+      const res = await fetch("/api/visualize-image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: providerOverride ?? imageProvider,
+          title: target.paper.title,
+          keyFindings: target.summary.keyFindings,
+          methods: target.summary.methods,
+          results: target.summary.results,
+          conclusion: target.summary.conclusion,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "이미지 생성에 실패했습니다.");
+      const geminiImage = data.image as string;
+      setLoadedPaper((prev) =>
+        prev && prev.paper.pmid === target.paper.pmid
+          ? { ...prev, geminiImage }
+          : prev,
+      );
+      setRecentPapers((prev) =>
+        prev.map((p) =>
+          p.paper.pmid === target.paper.pmid ? { ...p, geminiImage } : p,
+        ),
+      );
+    } catch (e) {
+      setGeminiError(e instanceof Error ? e.message : "알 수 없는 오류");
+    } finally {
+      setGeminiLoading(false);
     }
   }
 
@@ -439,8 +979,8 @@ export default function Home() {
     if (tab === "quiz" && loadedPaper && !loadedPaper.quiz) {
       handleQuiz(loadedPaper);
     }
-    if (tab === "visualize" && loadedPaper && !loadedPaper.visualize) {
-      handleVisualize(loadedPaper);
+    if (tab === "guide" && loadedPaper && !loadedPaper.guide) {
+      handleGuide(loadedPaper);
     }
   }
 
@@ -482,127 +1022,588 @@ export default function Home() {
     }
   }
 
+  // 용어 호버 툴팁 표시 (좌표는 호버한 요소 기준, 화면 밖으로 안 나가게 보정)
+  function showTermTip(term: MedicalTerm | null, el: HTMLElement | null) {
+    if (!term || !el) {
+      setTermTip(null);
+      return;
+    }
+    const r = el.getBoundingClientRect();
+    const x = Math.min(Math.max(r.left + r.width / 2, 140), window.innerWidth - 140);
+    setTermTip({ term, x, y: r.bottom + 6 });
+  }
+
+  const activeTerms = loadedPaper?.translation?.terms ?? [];
+
+  // 좌측 원문: 형광펜 강조 + 용어 호버를 함께 렌더
+  function renderOriginal(text: string) {
+    if (!text) return text;
+    return renderRich(text, {
+      terms: activeTerms,
+      highlight,
+      onTip: showTermTip,
+      markRef,
+    });
+  }
+
+  // 중앙 요약: 용어 호버만 렌더
+  function renderSummaryText(text: string) {
+    if (!text) return text;
+    return renderRich(text, { terms: activeTerms, onTip: showTermTip });
+  }
+
+  function toggleHighlight(source: string | undefined) {
+    if (!source) return;
+    setHighlight((prev) => (prev === source ? null : source));
+    setSearchOpen(false);
+    // 형광펜은 PDF·텍스트 양쪽 모드에서 동작하므로 현재 보기를 강제 전환하지 않는다
+  }
+
   return (
-    <div className="flex flex-1 h-screen bg-zinc-50 text-zinc-900">
-      <aside className="w-1/5 min-w-60 border-r border-zinc-200 bg-white flex flex-col">
-        <div className="p-4 border-b border-zinc-200">
-          <h2 className="text-sm font-semibold text-zinc-500 uppercase tracking-wide mb-3">
-            논문 검색
-          </h2>
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                handleAnalyzePaper();
-              }
-            }}
-            placeholder="PubMed ID 또는 DOI"
-            disabled={paperLoading}
-            className="w-full px-3 py-2 text-sm border border-zinc-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-zinc-100"
-          />
-          <button
-            onClick={() => handleAnalyzePaper()}
-            disabled={paperLoading || !searchQuery.trim()}
-            className="mt-2 w-full px-3 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 disabled:bg-zinc-300 disabled:cursor-not-allowed transition-colors"
-          >
-            {paperLoading ? "분석 중..." : "분석"}
-          </button>
-
-          <div className="mt-3 flex items-center gap-2">
-            <div className="flex-1 h-px bg-zinc-200" />
-            <span className="text-xs text-zinc-400">또는</span>
-            <div className="flex-1 h-px bg-zinc-200" />
+    <div className="flex flex-col h-screen overflow-hidden bg-slate-100 text-slate-800">
+      {termTip && (
+        <div
+          className="pointer-events-none fixed z-50 w-64 -translate-x-1/2 rounded-lg border border-zinc-200 bg-white p-3 text-left shadow-xl"
+          style={{ left: termTip.x, top: termTip.y }}
+        >
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className="text-sm font-semibold text-zinc-900">
+              {termTip.term.korean}
+            </span>
+            <span className="text-xs italic text-zinc-500">
+              {termTip.term.english}
+            </span>
+            <span
+              className={`rounded px-1 py-0.5 text-[10px] font-semibold ${
+                termTip.term.difficulty === "상"
+                  ? "bg-amber-100 text-amber-700"
+                  : "bg-zinc-100 text-zinc-500"
+              }`}
+            >
+              {termTip.term.difficulty}
+            </span>
           </div>
+          <p className="mt-1 text-xs leading-relaxed text-zinc-700">
+            {termTip.term.explanation}
+          </p>
+        </div>
+      )}
+      {explainPopup && (
+        <div
+          className="fixed z-50 w-72 -translate-x-1/2 rounded-lg border border-zinc-200 bg-white p-3 shadow-xl"
+          style={{ left: explainPopup.x, top: explainPopup.y }}
+        >
+          <div className="mb-1 flex items-start justify-between gap-2">
+            <span className="break-words text-sm font-semibold text-zinc-900">
+              “{explainPopup.term}”
+            </span>
+            <button
+              onClick={() => setExplainPopup(null)}
+              className="shrink-0 text-xs text-zinc-400 hover:text-zinc-600"
+              aria-label="닫기"
+            >
+              ✕
+            </button>
+          </div>
+          {explainPopup.loading ? (
+            <div className="animate-pulse py-1 text-xs text-zinc-400">
+              해설 생성 중...
+            </div>
+          ) : explainPopup.error ? (
+            <div className="text-xs text-red-600">{explainPopup.error}</div>
+          ) : (
+            <p className="whitespace-pre-wrap text-xs leading-relaxed text-zinc-700">
+              {explainPopup.text}
+            </p>
+          )}
+        </div>
+      )}
+      {showWelcome && (
+        <FeatureTip
+          title="PaperMentor 사용 안내"
+          badge="처음 오셨나요?"
+          onClose={closeWelcome}
+          onNeverShow={neverShowWelcome}
+        >
+          <p className="text-[13px] text-zinc-500">
+            의학 논문을 단계별로 읽고 이해하도록 돕는 도구입니다. 화면은 세 부분으로 나뉩니다.
+          </p>
+          <ul className="space-y-2 text-[13px]">
+            <li className="flex gap-2">
+              <span>📄</span>
+              <span>
+                <span className="font-semibold text-zinc-800">왼쪽 — 논문 올리기 / 원문</span>
+                <br />
+                위쪽에서 PubMed ID·DOI를 넣거나 PDF를 끌어다 놓으면 분석이 시작돼요. 분석 후엔 같은 자리에 원문이 표시됩니다.
+              </span>
+            </li>
+            <li className="flex gap-2">
+              <span>📊</span>
+              <span>
+                <span className="font-semibold text-zinc-800">가운데 — 시각화 요약 + 핵심 요약</span>
+                <br />
+                분석하면 핵심 내용을 한눈에 보는 시각화 요약 이미지가 자동으로 만들어지고, 그 아래에 핵심 결과·배경·방법·결론이 정리돼요. 핵심 결과를 누르면 왼쪽 원문에서 근거 문장이 형광펜으로 표시됩니다.
+              </span>
+            </li>
+            {SHOW_RIGHT_PANEL && (
+              <li className="flex gap-2">
+                <span>🧭</span>
+                <span>
+                  <span className="font-semibold text-zinc-800">오른쪽 — 읽기 도구 탭</span>
+                  <br />
+                  읽기 가이드 · 배경지식 · 통계 해석 · 퀴즈 · Q&A를 탭에서 볼 수 있어요.
+                </span>
+              </li>
+            )}
+          </ul>
+          <p className="text-[12px] text-zinc-400">
+            이 안내는 가운데 상단의 <span className="font-medium text-zinc-500">? 사용 안내</span> 버튼으로 언제든 다시 볼 수 있어요.
+          </p>
+        </FeatureTip>
+      )}
+      {showSourceTip && (
+        <FeatureTip
+          title="🖍 원문 근거 보기"
+          badge="새 기능"
+          onClose={closeSourceTip}
+          onNeverShow={neverShowSourceTip}
+        >
+          <p>
+            가운데 <span className="font-semibold text-zinc-800">핵심 결과</span>{" "}
+            항목을 누르면, 그 내용이 왼쪽 <span className="font-semibold text-zinc-800">논문 원본</span>의
+            어느 문장에서 나왔는지 <span className="rounded bg-yellow-200 px-1 text-zinc-900">형광펜</span>으로
+            표시되고 그 위치로 이동합니다.
+          </p>
+          <p className="text-[13px] text-zinc-500">
+            요약이 본문 어디에 근거하는지 바로 확인하면서 읽어 보세요.
+          </p>
+        </FeatureTip>
+      )}
 
-          <label
-            className={`mt-3 flex items-center justify-center gap-2 w-full px-3 py-2 border border-dashed border-zinc-300 rounded-md text-sm text-zinc-600 transition-colors ${
-              paperLoading
-                ? "cursor-not-allowed opacity-60"
-                : "cursor-pointer hover:bg-zinc-50 hover:border-blue-400"
-            }`}
+      {/* ── 상단 브랜딩 헤더 ───────────────────────────────────── */}
+      <header className="shrink-0 z-20 flex items-center gap-3 border-b-2 border-blue-900/15 bg-white px-5 py-2.5">
+        <div className="flex items-center gap-3">
+          {/* PM 책 로고 */}
+          <svg
+            viewBox="0 0 44 44"
+            className="h-10 w-10 shrink-0"
+            aria-hidden
           >
+            <defs>
+              <linearGradient id="pmGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#2dd4bf" />
+                <stop offset="48%" stopColor="#3b82f6" />
+                <stop offset="100%" stopColor="#1e3a8a" />
+              </linearGradient>
+            </defs>
+            {/* 펼친 책 — 좌/우 페이지 */}
+            <path
+              d="M22 12.5c-4-2.6-10-2.6-15-1v22c5-1.6 11-1.6 15 1z"
+              fill="url(#pmGrad)"
+            />
+            <path
+              d="M22 12.5c4-2.6 10-2.6 15-1v22c-5-1.6-11-1.6-15 1z"
+              fill="url(#pmGrad)"
+              opacity="0.88"
+            />
+            <line x1="22" y1="12.8" x2="22" y2="34.2" stroke="#fff" strokeWidth="1" opacity="0.45" />
+            {/* PM 모노그램 */}
+            <text x="14.2" y="27.5" textAnchor="middle" fontSize="11.5" fontWeight="800" fill="#fff">P</text>
+            <text x="29.8" y="27.5" textAnchor="middle" fontSize="11.5" fontWeight="800" fill="#fff">M</text>
+          </svg>
+          <div className="leading-tight">
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-[17px] font-extrabold tracking-tight text-[#1e3a8a]">
+                PAPERMENTOR
+              </span>
+              <span className="rounded bg-blue-50 px-1.5 py-px text-[10px] font-semibold text-blue-600">
+                beta
+              </span>
+            </div>
+            <div className="text-[11px] tracking-tight text-slate-400">
+              의학 논문 학습 지원 플랫폼
+            </div>
+          </div>
+        </div>
+
+        {/* 글자 크기 조절 */}
+        <div className="ml-auto flex items-center gap-2">
+          <span className="hidden text-[11px] text-slate-400 sm:inline">
+            글자 크기
+          </span>
+          <div className="flex items-center rounded-lg border border-slate-200 bg-white p-0.5">
+            <button
+              onClick={() => setFontScale((s) => Math.max(FONT_MIN, s - 1))}
+              disabled={fontScale <= FONT_MIN}
+              aria-label="글자 작게"
+              className="flex h-7 w-7 items-center justify-center rounded-md text-[15px] text-slate-500 transition-colors hover:bg-slate-100 disabled:opacity-30"
+            >
+              −
+            </button>
+            <button
+              onClick={() => setFontScale(FONT_DEFAULT)}
+              title="기본 크기로 되돌리기"
+              className="min-w-[44px] px-1 text-center text-[12px] font-medium tabular-nums text-slate-600 hover:text-blue-600"
+            >
+              {Math.round((fontScale / FONT_DEFAULT) * 100)}%
+            </button>
+            <button
+              onClick={() => setFontScale((s) => Math.min(FONT_MAX, s + 1))}
+              disabled={fontScale >= FONT_MAX}
+              aria-label="글자 크게"
+              className="flex h-7 w-7 items-center justify-center rounded-md text-[18px] text-slate-500 transition-colors hover:bg-slate-100 disabled:opacity-30"
+            >
+              +
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* ── 본문 3분할 ─────────────────────────────────────────── */}
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+      <aside
+        style={{ width: leftW }}
+        className="shrink-0 border-r border-slate-200 bg-slate-50 flex flex-col overflow-hidden min-h-0"
+      >
+        {/* 접이식: 논문 검색 · 최근 분석 (논문 로드 시 접힘) */}
+        <div className="shrink-0 border-b border-zinc-200">
+          <button
+            onClick={() => setSearchOpen((o) => !o)}
+            className="flex w-full items-center justify-between px-4 py-3 transition-colors hover:bg-zinc-50"
+          >
+            <span className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-zinc-500">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                strokeWidth={1.7}
+                stroke="currentColor"
+                className="h-4 w-4"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z"
+                />
+              </svg>
+              논문 검색 · 새 논문
+              {recentPapers.length > 0 && (
+                <span className="rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium normal-case text-zinc-500">
+                  최근 {recentPapers.length}
+                </span>
+              )}
+            </span>
             <svg
               xmlns="http://www.w3.org/2000/svg"
               fill="none"
               viewBox="0 0 24 24"
-              strokeWidth={1.5}
+              strokeWidth={2}
               stroke="currentColor"
-              className="w-4 h-4"
+              className={`h-4 w-4 text-zinc-400 transition-transform ${
+                searchOpen ? "rotate-180" : ""
+              }`}
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5"
-              />
+              <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
             </svg>
-            PDF 업로드
-            <input
-              type="file"
-              accept="application/pdf"
-              disabled={paperLoading}
-              className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) handlePdfUpload(file);
-                e.target.value = "";
-              }}
-            />
-          </label>
+          </button>
 
-          {paperError && (
-            <div className="mt-2 bg-red-50 border border-red-200 text-red-700 rounded-md p-2 text-xs">
-              {paperError}
+          {searchOpen && (
+            <div className="px-4 pb-4">
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    handleAnalyzePaper();
+                  }
+                }}
+                placeholder="PubMed ID 또는 DOI"
+                disabled={paperLoading}
+                className="w-full px-3 py-2 text-sm border border-zinc-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-zinc-100"
+              />
+              <button
+                onClick={() => handleAnalyzePaper()}
+                disabled={paperLoading || !searchQuery.trim()}
+                className="mt-2 w-full px-3 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 disabled:bg-zinc-300 disabled:cursor-not-allowed transition-colors"
+              >
+                {paperLoading ? "분석 중..." : "분석"}
+              </button>
+
+              <div className="mt-3 flex items-center gap-2">
+                <div className="flex-1 h-px bg-zinc-200" />
+                <span className="text-xs text-zinc-400">또는</span>
+                <div className="flex-1 h-px bg-zinc-200" />
+              </div>
+
+              <label
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  if (!paperLoading) setIsDragging(true);
+                }}
+                onDragLeave={(e) => {
+                  e.preventDefault();
+                  setIsDragging(false);
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setIsDragging(false);
+                  if (paperLoading) return;
+                  acceptPdfFile(e.dataTransfer.files?.[0]);
+                }}
+                className={`mt-3 flex flex-col items-center justify-center gap-1 w-full px-3 py-4 border border-dashed rounded-md text-sm transition-colors ${
+                  paperLoading
+                    ? "cursor-not-allowed opacity-60 border-zinc-300 text-zinc-600"
+                    : isDragging
+                      ? "cursor-copy border-blue-500 bg-blue-50 text-blue-700"
+                      : "cursor-pointer border-zinc-300 text-zinc-600 hover:bg-zinc-50 hover:border-blue-400"
+                }`}
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  strokeWidth={1.5}
+                  stroke="currentColor"
+                  className="w-5 h-5"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5"
+                  />
+                </svg>
+                <span className="font-medium">
+                  {isDragging ? "여기에 놓으세요" : "PDF 업로드"}
+                </span>
+                <span className="text-xs text-zinc-400">
+                  클릭하거나 파일을 끌어다 놓기
+                </span>
+                <input
+                  type="file"
+                  accept="application/pdf"
+                  disabled={paperLoading}
+                  className="hidden"
+                  onChange={(e) => {
+                    acceptPdfFile(e.target.files?.[0]);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+
+              {paperError && (
+                <div className="mt-2 bg-red-50 border border-red-200 text-red-700 rounded-md p-2 text-xs">
+                  {paperError}
+                </div>
+              )}
+
+              {recentPapers.length > 0 && (
+                <div className="mt-4">
+                  <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
+                    최근 분석 논문
+                  </h3>
+                  <ul className="space-y-2">
+                    {recentPapers.map((item) => (
+                      <li key={item.paper.pmid}>
+                        <button
+                          onClick={() => {
+                            setLoadedPaper(item);
+                            setChatHistory([]);
+                            setQuizAnswers({});
+                            setActiveTab("guide");
+                            setSearchOpen(false);
+                            setOriginalView(item.pdfUrl ? "pdf" : "text");
+                            if (!item.geminiImage) {
+                              handleGenerateImage(item, "gemini");
+                            }
+                            if (!item.translation) {
+                              handleTranslate(item);
+                            }
+                          }}
+                          className={`w-full text-left p-2 text-sm rounded-md transition-colors ${
+                            loadedPaper?.paper.pmid === item.paper.pmid
+                              ? "bg-blue-50 text-blue-900 border border-blue-200"
+                              : "hover:bg-zinc-100 text-zinc-700"
+                          }`}
+                        >
+                          <div className="font-medium line-clamp-2">
+                            {item.paper.title}
+                          </div>
+                          <div className="text-xs text-zinc-500 mt-1">
+                            PMID: {item.paper.pmid}
+                          </div>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4">
-          <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
-            최근 분석 논문
-          </h3>
-          {recentPapers.length === 0 ? (
-            <p className="text-xs text-zinc-400">
-              PubMed ID나 DOI를 입력하면 여기에 추가됩니다.
-            </p>
+        {/* 논문 원본 */}
+        <div className="flex-1 min-h-0 flex flex-col">
+          {loadedPaper ? (
+            <>
+              <div className="shrink-0 flex items-center justify-between gap-2 px-4 pt-4 pb-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                  논문 원본
+                </span>
+                {loadedPaper.pdfUrl && (
+                  <div className="flex rounded-md border border-zinc-200 p-0.5 text-[11px] font-medium">
+                    {(
+                      [
+                        ["pdf", "📄 PDF"],
+                        ["text", "📝 텍스트"],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <button
+                        key={key}
+                        onClick={() => setOriginalView(key)}
+                        className={`rounded px-2 py-0.5 transition-colors ${
+                          originalView === key
+                            ? "bg-blue-600 text-white"
+                            : "text-zinc-500 hover:text-zinc-700"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {loadedPaper.pdfUrl && originalView === "pdf" ? (
+                <PdfViewer url={loadedPaper.pdfUrl} highlight={highlight} />
+              ) : (
+                <div
+                  className="flex-1 min-h-0 overflow-y-auto px-4 pb-4"
+                  data-explain
+                >
+                  <article>
+                    <h1 className="text-base font-semibold leading-snug text-zinc-900">
+                      {loadedPaper.paper.title}
+                    </h1>
+                    <div className="mt-1.5 space-y-0.5 text-xs text-zinc-500">
+                      {loadedPaper.paper.journal && (
+                        <div>
+                          {loadedPaper.paper.journal}
+                          {loadedPaper.paper.pubdate
+                            ? ` · ${loadedPaper.paper.pubdate}`
+                            : ""}
+                        </div>
+                      )}
+                      {loadedPaper.paper.authors?.length > 0 && (
+                        <div className="line-clamp-2">
+                          {loadedPaper.paper.authors.slice(0, 8).join(", ")}
+                          {loadedPaper.paper.authors.length > 8
+                            ? ` 외 ${loadedPaper.paper.authors.length - 8}명`
+                            : ""}
+                        </div>
+                      )}
+                      <div className="flex flex-wrap gap-x-3 pt-0.5">
+                        {loadedPaper.paper.pmid && (
+                          <span>PMID: {loadedPaper.paper.pmid}</span>
+                        )}
+                        {loadedPaper.paper.doi && (
+                          <a
+                            href={`https://doi.org/${loadedPaper.paper.doi}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-600 underline hover:text-blue-700"
+                          >
+                            DOI 원문 ↗
+                          </a>
+                        )}
+                      </div>
+                    </div>
+
+                    {loadedPaper.pdfUrl && (
+                      <p className="mt-2 rounded-md bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
+                        텍스트 모드는 AI가 추출한 발췌본입니다. 정확한 원문·그림은 📄 PDF 모드로 보세요.
+                      </p>
+                    )}
+
+                    <div className="mt-4">
+                      <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                        초록 (Abstract)
+                      </div>
+                      <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-700">
+                        {loadedPaper.paper.abstract
+                          ? renderOriginal(loadedPaper.paper.abstract)
+                          : "초록이 제공되지 않았습니다."}
+                      </p>
+                    </div>
+
+                    {loadedPaper.paper.fullText ? (
+                      <div className="mt-4 border-t border-zinc-100 pt-4">
+                        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                          본문 발췌 (Full text)
+                        </div>
+                        <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-700">
+                          {renderOriginal(loadedPaper.paper.fullText)}
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="mt-4 border-t border-zinc-100 pt-4 text-xs text-zinc-400">
+                        본문 전문은 제공되지 않았습니다. (초록 기준으로 분석합니다)
+                      </p>
+                    )}
+                  </article>
+                </div>
+              )}
+            </>
           ) : (
-            <ul className="space-y-2">
-              {recentPapers.map((item) => (
-                <li key={item.paper.pmid}>
-                  <button
-                    onClick={() => {
-                      setLoadedPaper(item);
-                      setChatHistory([]);
-                      setQuizAnswers({});
-                      setActiveTab("background");
-                    }}
-                    className={`w-full text-left p-2 text-sm rounded-md transition-colors ${
-                      loadedPaper?.paper.pmid === item.paper.pmid
-                        ? "bg-blue-50 text-blue-900 border border-blue-200"
-                        : "hover:bg-zinc-100 text-zinc-700"
-                    }`}
-                  >
-                    <div className="font-medium line-clamp-2">
-                      {item.paper.title}
-                    </div>
-                    <div className="text-xs text-zinc-500 mt-1">
-                      PMID: {item.paper.pmid}
-                    </div>
-                  </button>
-                </li>
-              ))}
-            </ul>
+            <div className="mt-8 px-6 text-center text-sm text-zinc-400">
+              <p>논문 원본</p>
+              <p className="mt-2 text-xs leading-relaxed">
+                위에서 PubMed ID·DOI로 검색하거나 PDF를 올리면
+                <br />
+                원문이 여기에 표시됩니다.
+              </p>
+            </div>
           )}
         </div>
       </aside>
 
-      <main className="flex-1 flex flex-col bg-white border-r border-zinc-200 overflow-hidden">
+      <div
+        onMouseDown={() => startResize("left")}
+        className="w-1.5 shrink-0 cursor-col-resize bg-zinc-200 hover:bg-blue-400 active:bg-blue-500 transition-colors"
+        title="드래그하여 너비 조절"
+      />
+
+      <main className="flex-1 min-w-0 flex flex-col bg-white overflow-hidden">
         <div className="p-6 border-b border-zinc-200">
-          <h2 className="text-sm font-semibold text-zinc-500 uppercase tracking-wide">
-            논문 요약
-          </h2>
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-zinc-500 uppercase tracking-wide">
+              논문 요약
+            </h2>
+            <div className="flex shrink-0 items-center gap-1.5">
+              <button
+                onClick={() => {
+                  setExplainMode((m) => !m);
+                  setExplainPopup(null);
+                }}
+                className={`flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                  explainMode
+                    ? "border-blue-600 bg-blue-600 text-white"
+                    : "border-zinc-200 text-zinc-500 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-600"
+                }`}
+                title="켜면 요약·원문에서 모르는 부분을 드래그할 때 해설이 나옵니다"
+              >
+                💬 용어 해설 {explainMode ? "ON" : "OFF"}
+              </button>
+              <button
+                onClick={() => setShowWelcome(true)}
+                className="flex items-center gap-1 rounded-full border border-zinc-200 px-2.5 py-1 text-[11px] font-medium text-zinc-500 transition-colors hover:border-blue-300 hover:bg-blue-50 hover:text-blue-600"
+                title="사용 안내 다시 보기"
+              >
+                <span className="text-sm leading-none">?</span> 사용 안내
+              </button>
+            </div>
+          </div>
           {loadedPaper && (
             <div className="mt-2">
               <h1 className="text-lg font-semibold text-zinc-900 leading-snug">
@@ -624,7 +1625,12 @@ export default function Home() {
             </div>
           )}
         </div>
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className="flex-1 overflow-y-auto bg-slate-50/60 p-6" data-explain>
+          {explainMode && loadedPaper && (
+            <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700">
+              💬 용어 해설 모드 — 요약이나 왼쪽 원문에서 <b>모르는 단어·구절을 드래그</b>하면 그 부분 해설이 떠요.
+            </div>
+          )}
           {paperLoading ? (
             <div className="flex flex-col items-center justify-center h-full text-zinc-400 gap-2">
               <div className="animate-pulse text-sm">
@@ -633,49 +1639,160 @@ export default function Home() {
             </div>
           ) : loadedPaper ? (
             <div className="space-y-6">
-              {loadedPaper.summary.keyFindings?.length > 0 && (
-                <section>
-                  <h3 className="text-base font-semibold mb-2">핵심 결과</h3>
-                  <ul className="space-y-2">
-                    {loadedPaper.summary.keyFindings.map((f, idx) => (
-                      <li
-                        key={idx}
-                        className="border-l-4 border-blue-500 bg-blue-50/40 rounded-r-md p-3"
+              {/* 시각화 요약 (Graphical Abstract) — 분석 직후 Gemini로 자동 생성 */}
+              <section>
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <h3 className="text-base font-semibold">
+                    시각화 요약 (Graphical Abstract)
+                  </h3>
+                  {(loadedPaper.geminiImage || geminiError) && !geminiLoading && (
+                    <button
+                      onClick={() => handleGenerateImage(loadedPaper, "gemini")}
+                      className="rounded-md border border-zinc-200 px-2.5 py-1 text-[11px] font-medium text-zinc-500 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-600"
+                    >
+                      다시 생성
+                    </button>
+                  )}
+                </div>
+                {geminiLoading ? (
+                  <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 py-10 text-sm text-zinc-400">
+                    <div className="animate-pulse">
+                      핵심 내용을 한 장의 그림으로 만드는 중입니다...
+                    </div>
+                    <div className="text-xs">(수십 초 소요)</div>
+                  </div>
+                ) : geminiError ? (
+                  <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                    <div className="mb-1 font-medium">
+                      시각화 이미지 생성에 실패했습니다.
+                    </div>
+                    <div className="mb-2 text-xs">{geminiError}</div>
+                    <button
+                      onClick={() => handleGenerateImage(loadedPaper, "gemini")}
+                      className="text-xs underline hover:text-red-800"
+                    >
+                      다시 시도
+                    </button>
+                  </div>
+                ) : loadedPaper.geminiImage ? (
+                  <div className="space-y-2">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={loadedPaper.geminiImage}
+                      alt="시각화 요약 (graphical abstract)"
+                      className="w-full rounded-xl border border-zinc-200"
+                    />
+                    <div className="flex items-center justify-between">
+                      <a
+                        href={loadedPaper.geminiImage}
+                        download="graphical-abstract.png"
+                        className="text-[11px] text-blue-600 underline hover:text-blue-700"
                       >
-                        <p className="text-sm font-semibold text-zinc-900 mb-1">
-                          {f.claim}
-                        </p>
-                        <p className="text-xs text-zinc-700 leading-relaxed">
-                          <span className="font-semibold text-zinc-600">
-                            근거:{" "}
-                          </span>
-                          {f.evidence}
-                        </p>
-                      </li>
-                    ))}
+                        이미지 저장
+                      </a>
+                      <span className="text-[10px] text-amber-600">
+                        ⚠ 차트·수치·이미지는 AI 생성물 — 원문과 대조 검증 필요
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between gap-2 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 p-3">
+                    <span className="text-xs text-zinc-400">
+                      핵심 내용을 한눈에 보는 시각화 요약을 만들 수 있어요.
+                    </span>
+                    <button
+                      onClick={() => handleGenerateImage(loadedPaper, "gemini")}
+                      className="shrink-0 rounded-md bg-zinc-900 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-zinc-700"
+                    >
+                      이미지 생성
+                    </button>
+                  </div>
+                )}
+              </section>
+
+              {loadedPaper.summary.keyFindings?.length > 0 && (
+                <section className="rounded-xl border border-blue-200/70 bg-blue-50/50 p-4">
+                  <div className="mb-3 flex items-center gap-2">
+                    <span className="h-4 w-1 rounded-full bg-blue-500" />
+                    <h3 className="text-[15px] font-semibold text-slate-900">
+                      핵심 결과
+                    </h3>
+                    <span className="text-[11px] text-slate-400">
+                      클릭하면 원문에 형광펜
+                    </span>
+                  </div>
+                  <ul className="space-y-2">
+                    {loadedPaper.summary.keyFindings.map((f, idx) => {
+                      const active = !!f.source && highlight === f.source;
+                      return (
+                        <li
+                          key={idx}
+                          onClick={() => {
+                            // 텍스트를 드래그(선택)한 경우엔 강조 토글하지 않음
+                            if (!window.getSelection()?.isCollapsed) return;
+                            toggleHighlight(f.source);
+                          }}
+                          className={`rounded-lg border border-l-4 p-3 transition-colors ${
+                            f.source ? "cursor-pointer" : ""
+                          } ${
+                            active
+                              ? "border-yellow-400 border-l-yellow-400 bg-yellow-50 ring-1 ring-yellow-300"
+                              : "border-slate-200 border-l-blue-500 bg-white hover:bg-blue-50/40"
+                          }`}
+                        >
+                          <p className="text-sm font-semibold text-zinc-900 mb-1">
+                            {renderSummaryText(f.claim)}
+                          </p>
+                          <p className="text-xs text-zinc-700 leading-relaxed">
+                            <span className="font-semibold text-zinc-600">
+                              근거:{" "}
+                            </span>
+                            {renderSummaryText(f.evidence)}
+                          </p>
+                          {f.source && (
+                            <div
+                              className={`mt-1.5 inline-flex items-center gap-1 text-[11px] font-medium ${
+                                active ? "text-yellow-700" : "text-blue-600"
+                              }`}
+                            >
+                              🖍 {active ? "원문에서 강조 중 (눌러서 해제)" : "원문에서 보기"}
+                            </div>
+                          )}
+                        </li>
+                      );
+                    })}
                   </ul>
                 </section>
               )}
               <SummarySection
                 title="연구 배경"
                 body={loadedPaper.summary.background}
+                tone="sky"
+                render={renderSummaryText}
               />
               <SummarySection
                 title="연구 방법"
                 body={loadedPaper.summary.methods}
+                tone="teal"
+                render={renderSummaryText}
               />
               <SummarySection
                 title="주요 결과"
                 body={loadedPaper.summary.results}
+                tone="indigo"
+                render={renderSummaryText}
               />
               <SummarySection
                 title="결론"
                 body={loadedPaper.summary.conclusion}
+                tone="emerald"
+                render={renderSummaryText}
               />
               <SummarySection
                 title="핵심 메시지"
                 body={loadedPaper.summary.keyMessage}
-                accent
+                tone="amber"
+                render={renderSummaryText}
               />
             </div>
           ) : (
@@ -703,28 +1820,38 @@ export default function Home() {
         </div>
       </main>
 
-      <aside className="w-[30%] min-w-90 bg-white flex flex-col">
-        <div className="border-b border-zinc-200">
-          <div className="flex overflow-x-auto scrollbar-none">
+      {SHOW_RIGHT_PANEL && (
+        <>
+          <div
+            onMouseDown={() => startResize("right")}
+            className="w-1.5 shrink-0 cursor-col-resize bg-zinc-200 hover:bg-blue-400 active:bg-blue-500 transition-colors"
+            title="드래그하여 너비 조절"
+          />
+
+          <aside
+            style={{ width: rightW }}
+            className="shrink-0 border-l border-slate-200 bg-slate-50 flex flex-col overflow-hidden"
+          >
+        <div className="border-b border-slate-200 bg-slate-50/60">
+          <div className="flex overflow-x-auto scrollbar-none px-1.5 pt-1.5">
             {(
               [
+                { key: "guide", label: "읽기 가이드" },
                 { key: "background", label: "배경지식" },
-                { key: "translate", label: "번역·설명" },
-                { key: "stats", label: "통계" },
-                { key: "qa", label: "Q&A" },
-                { key: "reliability", label: "신뢰도" },
+                { key: "stats", label: "통계 해석" },
                 { key: "quiz", label: "퀴즈" },
-                { key: "visualize", label: "시각화" },
+                { key: "qa", label: "Q&A" },
+                // 시각화 → 중앙으로 이동, 신뢰도·의학용어 해석 → 일시 비활성화 (코드/탭 렌더는 아래 보존)
               ] as { key: RightTab; label: string }[]
             ).map(({ key, label }) => (
               <button
                 key={key}
                 onClick={() => handleTabChange(key)}
                 disabled={!loadedPaper}
-                className={`shrink-0 px-3 py-3 text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                className={`shrink-0 rounded-t-lg px-3.5 py-2.5 text-[13px] font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
                   activeTab === key
-                    ? "text-blue-600 border-b-2 border-blue-600"
-                    : "text-zinc-500 hover:text-zinc-700"
+                    ? "bg-white text-blue-600 shadow-[0_-2px_0_inset_rgba(37,99,235,1)]"
+                    : "text-slate-500 hover:bg-white/60 hover:text-slate-700"
                 }`}
               >
                 {label}
@@ -737,7 +1864,7 @@ export default function Home() {
           <div className="flex-1 flex flex-col overflow-hidden">
             <div className="flex-1 overflow-y-auto p-4 space-y-3">
               {chatHistory.length === 0 && !error && (
-                <div className="text-center text-sm text-zinc-400 mt-8">
+                <div className="text-center text-sm text-slate-400 mt-14 px-6">
                   {loadedPaper ? (
                     <>
                       <p className="mb-2 font-medium text-zinc-500">논문 QA</p>
@@ -820,14 +1947,14 @@ export default function Home() {
         {activeTab === "stats" && (
           <div className="flex-1 overflow-y-auto p-4">
             {!loadedPaper ? (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 <p>통계 해석 탭</p>
                 <p className="text-xs mt-2">
                   좌측에서 논문을 먼저 분석하세요
                 </p>
               </div>
             ) : statsLoading ? (
-              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6 animate-pulse">
                 통계 수치 해석 중입니다...
               </div>
             ) : statsError ? (
@@ -852,7 +1979,7 @@ export default function Home() {
                       {loadedPaper.statistics.items.map((item, idx) => (
                         <li
                           key={`${item.metric}-${idx}`}
-                          className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60"
+                          className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
                         >
                           <div className="flex items-baseline gap-2 flex-wrap mb-2">
                             <span
@@ -912,7 +2039,7 @@ export default function Home() {
                 )}
               </div>
             ) : (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 통계 해석을 불러오는 중...
               </div>
             )}
@@ -922,15 +2049,15 @@ export default function Home() {
         {activeTab === "translate" && (
           <div className="flex-1 overflow-y-auto p-4">
             {!loadedPaper ? (
-              <div className="text-center text-sm text-zinc-400 mt-8">
-                <p>번역·설명 탭</p>
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
+                <p>의학용어 해석 탭</p>
                 <p className="text-xs mt-2">
                   좌측에서 논문을 먼저 분석하세요
                 </p>
               </div>
             ) : translateLoading ? (
-              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
-                의학 특화 번역 중입니다...
+              <div className="text-center text-sm text-slate-400 mt-14 px-6 animate-pulse">
+                의학용어 해석을 준비 중입니다...
               </div>
             ) : translateError ? (
               <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-3 text-sm">
@@ -963,7 +2090,7 @@ export default function Home() {
                       {loadedPaper.translation.terms.map((term, idx) => (
                         <li
                           key={`${term.english}-${idx}`}
-                          className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60"
+                          className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
                         >
                           <div className="flex items-baseline gap-2 flex-wrap mb-1">
                             <span className="font-semibold text-sm text-zinc-900">
@@ -992,8 +2119,8 @@ export default function Home() {
                 )}
               </div>
             ) : (
-              <div className="text-center text-sm text-zinc-400 mt-8">
-                번역을 불러오는 중...
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
+                의학용어 해석을 불러오는 중...
               </div>
             )}
           </div>
@@ -1002,14 +2129,14 @@ export default function Home() {
         {activeTab === "background" && (
           <div className="flex-1 overflow-y-auto p-4">
             {!loadedPaper ? (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 <p>배경지식 탭</p>
                 <p className="text-xs mt-2">
                   좌측에서 논문을 먼저 분석하세요
                 </p>
               </div>
             ) : backgroundLoading ? (
-              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6 animate-pulse">
                 논문을 읽기 위한 배경지식을 정리하는 중입니다...
               </div>
             ) : backgroundError ? (
@@ -1032,7 +2159,7 @@ export default function Home() {
                   {loadedPaper.background.cards.map((card, idx) => (
                     <section
                       key={`${card.concept}-${idx}`}
-                      className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60"
+                      className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
                     >
                       <h3 className="font-semibold text-sm text-zinc-900 mb-1">
                         {card.concept}
@@ -1048,12 +2175,12 @@ export default function Home() {
                   ))}
                 </div>
               ) : (
-                <div className="text-center text-sm text-zinc-400 mt-8">
+                <div className="text-center text-sm text-slate-400 mt-14 px-6">
                   생성된 배경지식 카드가 없습니다.
                 </div>
               )
             ) : (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 배경지식을 불러오는 중...
               </div>
             )}
@@ -1063,12 +2190,12 @@ export default function Home() {
         {activeTab === "reliability" && (
           <div className="flex-1 overflow-y-auto p-4">
             {!loadedPaper ? (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 <p>신뢰도 탭</p>
                 <p className="text-xs mt-2">좌측에서 논문을 먼저 분석하세요</p>
               </div>
             ) : reliabilityLoading ? (
-              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6 animate-pulse">
                 논문 신뢰도를 분석하는 중입니다...
               </div>
             ) : reliabilityError ? (
@@ -1088,7 +2215,7 @@ export default function Home() {
                   {loadedPaper.reliability.cards.map((card, idx) => (
                     <li
                       key={idx}
-                      className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60"
+                      className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
                     >
                       <div className="flex items-center gap-2 mb-2">
                         <span className="text-xs font-semibold text-zinc-500 uppercase tracking-wide">
@@ -1127,7 +2254,7 @@ export default function Home() {
                 )}
               </div>
             ) : (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 신뢰도 분석을 불러오는 중...
               </div>
             )}
@@ -1137,12 +2264,12 @@ export default function Home() {
         {activeTab === "quiz" && (
           <div className="flex-1 overflow-y-auto p-4">
             {!loadedPaper ? (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 <p>퀴즈 탭</p>
                 <p className="text-xs mt-2">좌측에서 논문을 먼저 분석하세요</p>
               </div>
             ) : quizLoading ? (
-              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6 animate-pulse">
                 논문 기반 퀴즈를 생성하는 중입니다...
               </div>
             ) : quizError ? (
@@ -1174,7 +2301,7 @@ export default function Home() {
                   return (
                     <section
                       key={qi}
-                      className="border border-zinc-200 rounded-md p-3 bg-zinc-50/60 mb-3"
+                      className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm mb-3"
                     >
                       <p className="text-sm font-medium text-zinc-900 mb-3">
                         <span className="text-zinc-400 mr-1">Q{qi + 1}.</span>
@@ -1234,8 +2361,53 @@ export default function Home() {
                 })}
               </div>
             ) : (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 퀴즈를 불러오는 중...
+              </div>
+            )}
+          </div>
+        )}
+        {activeTab === "guide" && (
+          <div className="flex-1 overflow-y-auto p-4">
+            {!loadedPaper ? (
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
+                <p>읽기 가이드 탭</p>
+                <p className="text-xs mt-2">좌측에서 논문을 먼저 분석하세요</p>
+              </div>
+            ) : guideLoading ? (
+              <div className="text-center text-sm text-slate-400 mt-14 px-6 animate-pulse">
+                읽기 가이드를 생성하는 중입니다...
+              </div>
+            ) : guideError ? (
+              <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-3 text-sm">
+                <div className="font-medium mb-1">오류</div>
+                <div className="text-xs mb-2">{guideError}</div>
+                <button
+                  onClick={() => handleGuide(loadedPaper)}
+                  className="text-xs underline text-red-600 hover:text-red-700"
+                >
+                  다시 시도
+                </button>
+              </div>
+            ) : loadedPaper.guide ? (
+              <ReadingGuide
+                data={loadedPaper.guide}
+                onOpenTab={(tab) => handleTabChange(tab as RightTab)}
+                onJump={(anchor) => toggleHighlight(anchor)}
+              />
+            ) : (
+              <div className="text-center mt-8 space-y-3">
+                <p className="text-sm text-zinc-500 leading-relaxed">
+                  논문을 어디서부터 어떻게 읽어야 할지
+                  <br />
+                  단계별 길잡이를 만들어 드립니다.
+                </p>
+                <button
+                  onClick={() => handleGuide(loadedPaper)}
+                  className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+                >
+                  읽기 가이드 생성
+                </button>
               </div>
             )}
           </div>
@@ -1243,74 +2415,136 @@ export default function Home() {
         {activeTab === "visualize" && (
           <div className="flex-1 overflow-y-auto p-4">
             {!loadedPaper ? (
-              <div className="text-center text-sm text-zinc-400 mt-8">
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
                 <p>시각화 탭</p>
                 <p className="text-xs mt-2">좌측에서 논문을 먼저 분석하세요</p>
               </div>
-            ) : visualizeLoading ? (
-              <div className="text-center text-sm text-zinc-400 mt-8 animate-pulse">
-                연구 구조 다이어그램을 생성하는 중입니다...
-              </div>
-            ) : visualizeError ? (
-              <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-3 text-sm">
-                <div className="font-medium mb-1">오류</div>
-                <div className="text-xs mb-2">{visualizeError}</div>
-                <button
-                  onClick={() => handleVisualize(loadedPaper)}
-                  className="text-xs underline text-red-600 hover:text-red-700"
-                >
-                  다시 시도
-                </button>
-              </div>
-            ) : loadedPaper.visualize ? (
-              <div className="space-y-4">
-                <MermaidDiagram code={loadedPaper.visualize.mermaid} />
-                {loadedPaper.visualize.description && (
-                  <p className="text-xs text-zinc-500 leading-relaxed">
-                    {loadedPaper.visualize.description}
-                  </p>
-                )}
-                <details className="text-xs text-zinc-400">
-                  <summary className="cursor-pointer hover:text-zinc-600">
-                    Mermaid 코드 보기
-                  </summary>
-                  <pre className="mt-2 bg-zinc-50 border border-zinc-200 rounded p-2 overflow-x-auto whitespace-pre-wrap">
-                    {loadedPaper.visualize.mermaid}
-                  </pre>
-                </details>
-              </div>
             ) : (
-              <div className="text-center text-sm text-zinc-400 mt-8">
-                다이어그램을 불러오는 중...
+              <div className="space-y-4">
+                {/* Graphical abstract 이미지 — 제공자 선택형 */}
+                <div className="rounded-xl border border-zinc-200 bg-white p-3">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                      Graphical Abstract (시각화 요약)
+                    </span>
+                    <button
+                      onClick={() => handleGenerateImage(loadedPaper)}
+                      disabled={geminiLoading}
+                      className="rounded-md bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-zinc-700 disabled:bg-zinc-300"
+                    >
+                      {geminiLoading
+                        ? "생성 중..."
+                        : loadedPaper.geminiImage
+                          ? "다시 생성"
+                          : "이미지 생성"}
+                    </button>
+                  </div>
+                  {/* 제공자 선택 */}
+                  <div className="mb-1 flex flex-wrap gap-1">
+                    {(
+                      [
+                        ["gemini", "Gemini"],
+                        ["openai", "OpenAI"],
+                        ["flux", "Flux"],
+                        ["ideogram", "Ideogram"],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <button
+                        key={key}
+                        onClick={() => setImageProvider(key)}
+                        disabled={geminiLoading}
+                        className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-50 ${
+                          imageProvider === key
+                            ? "bg-blue-600 text-white"
+                            : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mb-2 text-[10px] text-zinc-400">
+                    Gemini·OpenAI는 직접 API, Flux·Ideogram은 Replicate 경유. 한글 품질은 Gemini가 가장 좋습니다.
+                  </p>
+                  {geminiError ? (
+                    <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-2 text-xs">
+                      {geminiError}
+                    </div>
+                  ) : geminiLoading ? (
+                    <div className="text-center text-xs text-zinc-400 py-6 animate-pulse">
+                      이미지를 생성하는 중입니다... (수십 초 소요)
+                    </div>
+                  ) : loadedPaper.geminiImage ? (
+                    <div className="space-y-2">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={loadedPaper.geminiImage}
+                        alt="생성된 graphical abstract"
+                        className="w-full rounded-md border border-zinc-200"
+                      />
+                      <div className="flex items-center justify-between">
+                        <a
+                          href={loadedPaper.geminiImage}
+                          download="graphical-abstract.png"
+                          className="text-[11px] text-blue-600 underline hover:text-blue-700"
+                        >
+                          이미지 저장
+                        </a>
+                        <span className="text-[10px] text-amber-600">
+                          ⚠ 차트·수치·이미지는 AI 생성물 — 원문과 대조 검증 필요
+                        </span>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-zinc-400 py-2">
+                      핵심 결과를 바탕으로 graphical abstract(시각화 요약 자료)를 생성합니다. 제공자를 고르고 위 버튼을 누르세요.
+                    </p>
+                  )}
+                </div>
               </div>
             )}
           </div>
         )}
-      </aside>
+          </aside>
+        </>
+      )}
+      </div>
     </div>
   );
 }
 
+// 섹션별 차분한 색 톤 (단조로움 방지 — 쿨톤 스윕 + 따뜻한 강조)
+const SECTION_TONES = {
+  blue: { wrap: "border-blue-200/70 bg-blue-50/50", bar: "bg-blue-500" },
+  sky: { wrap: "border-sky-200/70 bg-sky-50/50", bar: "bg-sky-500" },
+  teal: { wrap: "border-teal-200/70 bg-teal-50/50", bar: "bg-teal-500" },
+  indigo: { wrap: "border-indigo-200/70 bg-indigo-50/50", bar: "bg-indigo-500" },
+  emerald: { wrap: "border-emerald-200/70 bg-emerald-50/50", bar: "bg-emerald-500" },
+  amber: { wrap: "border-amber-200/70 bg-amber-50/60", bar: "bg-amber-500" },
+} as const;
+
+type SectionTone = keyof typeof SECTION_TONES;
+
 function SummarySection({
   title,
   body,
-  accent,
+  tone = "blue",
+  render,
 }: {
   title: string;
   body: string;
-  accent?: boolean;
+  tone?: SectionTone;
+  render?: (text: string) => ReactNode;
 }) {
+  const t = SECTION_TONES[tone];
   return (
-    <section
-      className={
-        accent
-          ? "border-l-4 border-blue-500 bg-blue-50/40 rounded-r-md p-4"
-          : undefined
-      }
-    >
-      <h3 className="text-base font-semibold mb-2">{title}</h3>
-      <p className="text-zinc-700 leading-relaxed text-sm whitespace-pre-wrap">
-        {body || "본문에 명시되어 있지 않습니다."}
+    <section className={`rounded-xl border p-4 ${t.wrap}`}>
+      <div className="mb-2 flex items-center gap-2">
+        <span className={`h-4 w-1 rounded-full ${t.bar}`} />
+        <h3 className="text-[15px] font-semibold text-slate-900">{title}</h3>
+      </div>
+      <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-700">
+        {body ? (render ? render(body) : body) : "본문에 명시되어 있지 않습니다."}
       </p>
     </section>
   );
