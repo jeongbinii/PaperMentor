@@ -1,33 +1,43 @@
 import { NextRequest, NextResponse } from "next/server";
+import { updateSession } from "@/app/lib/supabase/middleware";
 
-// 사이트 전체에 HTTP Basic 인증 게이트를 건다.
-// 비밀번호는 환경변수(SITE_AUTH_USER / SITE_AUTH_PASS)로만 설정 — 코드에 노출하지 않는다.
-// SITE_AUTH_PASS 가 비어 있으면 게이트는 비활성(누구나 접근). 공개 전환은 환경변수만 지우면 됨.
+// 정적 자산(_next)·favicon 은 제외하고 페이지·API 전체를 처리
 export const config = {
-  // 정적 자산(_next)·favicon 은 제외하고 페이지·API 전체를 보호
   matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };
 
-export function middleware(req: NextRequest) {
+export async function middleware(req: NextRequest) {
+  // 0) 인증 콜백/로그아웃은 베타 게이트를 건너뛴다.
+  //    구글에서 돌아오는 /auth/callback 리다이렉트엔 Basic 인증 헤더가 실리지 않아
+  //    게이트가 막으면 로그인이 완성되지 못한다(401). 이 경로들은 세션 갱신만 태운다.
+  if (req.nextUrl.pathname.startsWith("/auth/")) {
+    return await updateSession(req);
+  }
+
+  // 1) 베타 접근 게이트 (HTTP Basic) — SITE_AUTH_PASS 설정 시에만 동작.
+  //    비밀번호 미설정 시 게이트 끔(공개 전환 스위치). 공개 후 실제 로그인만 쓰려면 이 env를 지우면 됨.
   const USER = process.env.SITE_AUTH_USER || "papermentor";
   const PASS = process.env.SITE_AUTH_PASS;
-
-  // 비밀번호 미설정 시 게이트 끔 (잠금 사고 방지 + 공개 전환 스위치)
-  if (!PASS) return NextResponse.next();
-
-  const header = req.headers.get("authorization");
-  if (header?.startsWith("Basic ")) {
-    const decoded = atob(header.slice(6));
-    const idx = decoded.indexOf(":");
-    const user = decoded.slice(0, idx);
-    const pwd = decoded.slice(idx + 1);
-    if (user === USER && pwd === PASS) {
-      return NextResponse.next();
+  if (PASS) {
+    const header = req.headers.get("authorization");
+    let ok = false;
+    if (header?.startsWith("Basic ")) {
+      const decoded = atob(header.slice(6));
+      const idx = decoded.indexOf(":");
+      const user = decoded.slice(0, idx);
+      const pwd = decoded.slice(idx + 1);
+      if (user === USER && pwd === PASS) ok = true;
+    }
+    if (!ok) {
+      return new NextResponse("Authentication required.", {
+        status: 401,
+        headers: {
+          "WWW-Authenticate": 'Basic realm="PaperMentor", charset="UTF-8"',
+        },
+      });
     }
   }
 
-  return new NextResponse("Authentication required.", {
-    status: 401,
-    headers: { "WWW-Authenticate": 'Basic realm="PaperMentor", charset="UTF-8"' },
-  });
+  // 2) 베타 게이트 통과 후 Supabase 로그인 세션 갱신
+  return await updateSession(req);
 }

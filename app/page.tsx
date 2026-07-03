@@ -4,6 +4,14 @@ import { useState, useEffect, useRef, type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import ReadingGuide from "./components/ReadingGuide";
 import FeatureTip from "./components/FeatureTip";
+import AuthStatus from "./components/AuthStatus";
+import { useUser } from "./lib/useUser";
+import {
+  saveAnalysis,
+  isBookmarked,
+  addBookmark,
+  removeBookmark,
+} from "./lib/db";
 
 // react-pdf는 브라우저 전용(pdf.js) → SSR 비활성화로 클라이언트에서만 로드
 const PdfViewer = dynamic(() => import("./components/PdfViewer"), {
@@ -32,6 +40,8 @@ type ChatMessage = {
 
 type RightTab = "guide" | "background" | "translate" | "stats" | "qa" | "reliability" | "quiz" | "visualize";
 
+type Figure = { label: string; caption: string; srcs: string[] };
+
 type PubMedPaper = {
   pmid: string;
   title: string;
@@ -41,6 +51,8 @@ type PubMedPaper = {
   pubdate: string;
   doi: string | null;
   fullText?: string;
+  bodyText?: string;
+  figures?: Figure[];
 };
 
 type KeyFinding = {
@@ -362,6 +374,11 @@ export default function Home() {
 
   const [paperLoading, setPaperLoading] = useState(false);
   const [paperError, setPaperError] = useState<string | null>(null);
+
+  // 로그인 사용자 + 북마크 상태(로그인 시에만 저장/북마크 UI 노출)
+  const { user } = useUser();
+  const [bookmarked, setBookmarked] = useState(false);
+  const [bookmarkBusy, setBookmarkBusy] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
 
   // 3분할 패널 너비 (px) — 가운데(main)는 flex-1로 나머지 차지
@@ -474,6 +491,62 @@ export default function Home() {
     }
   }, [fontScale]);
 
+  // 내 서재 등에서 ?q=PMID/DOI 로 진입하면 자동으로 그 논문을 분석
+  const autoRanRef = useRef(false);
+  useEffect(() => {
+    if (autoRanRef.current) return;
+    autoRanRef.current = true;
+    const q = new URLSearchParams(window.location.search).get("q");
+    // PDF 업로드본(pdf:파일명)은 서버에 원본이 없어 재분석 불가 → 자동실행하지 않음
+    if (q && !q.startsWith("pdf:")) {
+      setSearchQuery(q);
+      void handleAnalyzePaper(q);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 현재 논문 북마크 토글(로그인 시에만 버튼 노출)
+  async function toggleBookmark() {
+    if (!loadedPaper || bookmarkBusy) return;
+    setBookmarkBusy(true);
+    const p = loadedPaper.paper;
+    try {
+      if (bookmarked) {
+        const ok = await removeBookmark(p.pmid);
+        if (ok) setBookmarked(false);
+      } else {
+        const ok = await addBookmark({
+          pmid: p.pmid,
+          title: p.title,
+          journal: p.journal,
+          authors: p.authors,
+          doi: p.doi,
+          pubdate: p.pubdate,
+        });
+        if (ok) setBookmarked(true);
+      }
+    } finally {
+      setBookmarkBusy(false);
+    }
+  }
+
+  // 로그인 상태·현재 논문에 맞춰 북마크 여부 동기화
+  // (분석 직후뿐 아니라 로그인/로그아웃 전환·서재 진입 레이스에도 대응)
+  useEffect(() => {
+    if (!user || !loadedPaper) {
+      setBookmarked(false);
+      return;
+    }
+    let alive = true;
+    isBookmarked(loadedPaper.paper.pmid).then((v) => {
+      if (alive) setBookmarked(v);
+    });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, loadedPaper?.paper.pmid]);
+
   // 용어 해설 모드: data-explain 영역에서 텍스트 선택 시 해당 부분 해설 생성
   useEffect(() => {
     if (!explainMode) return;
@@ -582,6 +655,9 @@ export default function Home() {
       pdfUrl,
     };
     setLoadedPaper(loaded);
+    // 로그인 상태면 분석을 히스토리에 저장(실패해도 분석엔 영향 없음).
+    // 북마크 여부는 아래 [user, 논문] useEffect가 동기화한다.
+    void saveAnalysis(paper, loaded.summary);
     setChatHistory([]);
     setQuizAnswers({});
     setActiveTab("guide");
@@ -1046,6 +1122,56 @@ export default function Home() {
     });
   }
 
+  // 전체 본문 렌더: @@FIG:n@@ 마커 위치에 논문 그림(이미지+캡션)을 끼워 넣는다.
+  function renderBodyWithFigures(text: string, figures: Figure[]) {
+    const parts = text.split(/@@FIG:(\d+)@@/);
+    const nodes: ReactNode[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      if (i % 2 === 0) {
+        const seg = parts[i];
+        if (seg.trim()) {
+          nodes.push(
+            <p
+              key={`t${i}`}
+              className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-700"
+            >
+              {renderOriginal(seg)}
+            </p>,
+          );
+        }
+      } else {
+        const fig = figures[Number(parts[i])];
+        if (fig && (fig.srcs.length > 0 || fig.caption)) {
+          nodes.push(
+            <figure key={`f${i}`} className="my-3 space-y-2">
+              {fig.srcs.map((src, k) => (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  key={k}
+                  src={src}
+                  alt={fig.label || "figure"}
+                  loading="lazy"
+                  className="w-full rounded-md border border-zinc-200"
+                />
+              ))}
+              {(fig.label || fig.caption) && (
+                <figcaption className="mt-1 text-[11px] leading-relaxed text-zinc-500">
+                  {fig.label && (
+                    <span className="font-semibold text-zinc-600">
+                      {fig.label}.{" "}
+                    </span>
+                  )}
+                  {fig.caption}
+                </figcaption>
+              )}
+            </figure>,
+          );
+        }
+      }
+    }
+    return nodes;
+  }
+
   // 중앙 요약: 용어 호버만 렌더
   function renderSummaryText(text: string) {
     if (!text) return text;
@@ -1226,8 +1352,9 @@ export default function Home() {
           </div>
         </div>
 
-        {/* 글자 크기 조절 */}
-        <div className="ml-auto flex items-center gap-2">
+        {/* 우측: 글자 크기 조절 + 로그인 상태 */}
+        <div className="ml-auto flex items-center gap-3">
+          <div className="flex items-center gap-2">
           <span className="hidden text-[11px] text-slate-400 sm:inline">
             글자 크기
           </span>
@@ -1256,6 +1383,8 @@ export default function Home() {
               +
             </button>
           </div>
+          </div>
+          <AuthStatus />
         </div>
       </header>
 
@@ -1537,10 +1666,22 @@ export default function Home() {
                       </p>
                     </div>
 
-                    {loadedPaper.paper.fullText ? (
+                    {loadedPaper.paper.bodyText ? (
+                      <div className="mt-4 border-t border-zinc-100 pt-4">
+                        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                          본문 (Full text)
+                        </div>
+                        <div className="space-y-1">
+                          {renderBodyWithFigures(
+                            loadedPaper.paper.bodyText,
+                            loadedPaper.paper.figures ?? [],
+                          )}
+                        </div>
+                      </div>
+                    ) : loadedPaper.paper.fullText ? (
                       <div className="mt-4 border-t border-zinc-100 pt-4">
                         <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
-                          본문 발췌 (Full text)
+                          본문 핵심 발췌
                         </div>
                         <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-700">
                           {renderOriginal(loadedPaper.paper.fullText)}
@@ -1606,9 +1747,37 @@ export default function Home() {
           </div>
           {loadedPaper && (
             <div className="mt-2">
-              <h1 className="text-lg font-semibold text-zinc-900 leading-snug">
-                {loadedPaper.paper.title}
-              </h1>
+              <div className="flex items-start justify-between gap-3">
+                <h1 className="text-lg font-semibold text-zinc-900 leading-snug">
+                  {loadedPaper.paper.title}
+                </h1>
+                {user && (
+                  <button
+                    onClick={toggleBookmark}
+                    disabled={bookmarkBusy}
+                    title={bookmarked ? "내 서재에서 빼기" : "내 서재에 저장"}
+                    className={`shrink-0 inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] font-medium transition-colors disabled:opacity-50 ${
+                      bookmarked
+                        ? "border-blue-200 bg-blue-50 text-blue-600"
+                        : "border-slate-200 bg-white text-slate-500 hover:border-blue-300 hover:text-blue-600"
+                    }`}
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      className="h-3.5 w-3.5"
+                      fill={bookmarked ? "currentColor" : "none"}
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    >
+                      <path
+                        d="M6 4h12a1 1 0 0 1 1 1v15l-7-4-7 4V5a1 1 0 0 1 1-1z"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    {bookmarked ? "저장됨" : "저장"}
+                  </button>
+                )}
+              </div>
               <p className="text-xs text-zinc-500 mt-1">
                 {loadedPaper.paper.journal}
                 {loadedPaper.paper.pubdate &&
