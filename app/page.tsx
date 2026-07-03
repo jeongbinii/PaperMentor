@@ -384,6 +384,11 @@ export default function Home() {
   // 3분할 패널 너비 (px) — 가운데(main)는 flex-1로 나머지 차지
   const [leftW, setLeftW] = useState(360);
   const [rightW, setRightW] = useState(440);
+
+  // 모바일(lg 미만): 한 번에 한 패널만 표시 — 하단 탭으로 전환
+  const [mobileView, setMobileView] = useState<
+    "original" | "summary" | "tools"
+  >("original");
   const resizingRef = useRef<null | "left" | "right">(null);
   const leftWRef = useRef(leftW);
   const rightWRef = useRef(rightW);
@@ -655,6 +660,7 @@ export default function Home() {
       pdfUrl,
     };
     setLoadedPaper(loaded);
+    setMobileView("summary"); // 모바일: 분석 직후 핵심요약 패널로 전환
     // 로그인 상태면 분석을 히스토리에 저장(실패해도 분석엔 영향 없음).
     // 북마크 여부는 아래 [user, 논문] useEffect가 동기화한다.
     void saveAnalysis(paper, loaded.summary);
@@ -1346,7 +1352,7 @@ export default function Home() {
                 beta
               </span>
             </div>
-            <div className="text-[11px] tracking-tight text-slate-400">
+            <div className="hidden text-[11px] tracking-tight text-slate-400 sm:block">
               의학 논문 학습 지원 플랫폼
             </div>
           </div>
@@ -1392,7 +1398,9 @@ export default function Home() {
       <div className="flex flex-1 min-h-0 overflow-hidden">
       <aside
         style={{ width: leftW }}
-        className="shrink-0 border-r border-slate-200 bg-slate-50 flex flex-col overflow-hidden min-h-0"
+        className={`shrink-0 border-r border-slate-200 bg-slate-50 flex flex-col overflow-hidden min-h-0 max-lg:!w-full max-lg:border-r-0 ${
+          mobileView === "original" ? "" : "max-lg:hidden"
+        }`}
       >
         {/* 접이식: 논문 검색 · 최근 분석 (논문 로드 시 접힘) */}
         <div className="shrink-0 border-b border-zinc-200">
@@ -1711,11 +1719,15 @@ export default function Home() {
 
       <div
         onMouseDown={() => startResize("left")}
-        className="w-1.5 shrink-0 cursor-col-resize bg-zinc-200 hover:bg-blue-400 active:bg-blue-500 transition-colors"
+        className="w-1.5 shrink-0 cursor-col-resize bg-zinc-200 hover:bg-blue-400 active:bg-blue-500 transition-colors max-lg:hidden"
         title="드래그하여 너비 조절"
       />
 
-      <main className="flex-1 min-w-0 flex flex-col bg-white overflow-hidden">
+      <main
+        className={`flex-1 min-w-0 flex flex-col bg-white overflow-hidden ${
+          mobileView === "summary" ? "" : "max-lg:hidden"
+        }`}
+      >
         <div className="p-6 border-b border-zinc-200">
           <div className="flex items-center justify-between gap-2">
             <h2 className="text-sm font-semibold text-zinc-500 uppercase tracking-wide">
@@ -1993,13 +2005,15 @@ export default function Home() {
         <>
           <div
             onMouseDown={() => startResize("right")}
-            className="w-1.5 shrink-0 cursor-col-resize bg-zinc-200 hover:bg-blue-400 active:bg-blue-500 transition-colors"
+            className="w-1.5 shrink-0 cursor-col-resize bg-zinc-200 hover:bg-blue-400 active:bg-blue-500 transition-colors max-lg:hidden"
             title="드래그하여 너비 조절"
           />
 
           <aside
             style={{ width: rightW }}
-            className="shrink-0 border-l border-slate-200 bg-slate-50 flex flex-col overflow-hidden"
+            className={`shrink-0 border-l border-slate-200 bg-slate-50 flex flex-col overflow-hidden max-lg:!w-full max-lg:border-l-0 ${
+              mobileView === "tools" ? "" : "max-lg:hidden"
+            }`}
           >
         <div className="border-b border-slate-200 bg-slate-50/60">
           <div className="flex overflow-x-auto scrollbar-none px-1.5 pt-1.5">
@@ -2678,6 +2692,29 @@ export default function Home() {
         </>
       )}
       </div>
+
+      {/* 모바일 하단 뷰 전환 (lg 미만에서만) */}
+      <nav className="lg:hidden shrink-0 grid grid-cols-3 border-t border-slate-200 bg-white">
+        {(
+          [
+            { key: "original", label: "원문" },
+            { key: "summary", label: "핵심요약" },
+            { key: "tools", label: "읽기도구" },
+          ] as { key: "original" | "summary" | "tools"; label: string }[]
+        ).map(({ key, label }) => (
+          <button
+            key={key}
+            onClick={() => setMobileView(key)}
+            className={`py-2.5 text-[13px] font-medium transition-colors ${
+              mobileView === key
+                ? "text-blue-600 shadow-[0_-2px_0_inset_rgba(37,99,235,1)]"
+                : "text-slate-400 hover:text-slate-600"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
     </div>
   );
 }
