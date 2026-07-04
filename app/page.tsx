@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import ReadingGuide from "./components/ReadingGuide";
 import FeatureTip from "./components/FeatureTip";
+import Onboarding from "./components/Onboarding";
 import AuthStatus from "./components/AuthStatus";
 import { useUser } from "./lib/useUser";
 import {
@@ -22,7 +23,8 @@ const PdfViewer = dynamic(() => import("./components/PdfViewer"), {
 });
 
 const SOURCE_TIP_KEY = "pm_source_tip_seen";
-const WELCOME_KEY = "pm_welcome_seen";
+// 온보딩 개편(단계별 안내) — 키를 올려 기존 이용자에게도 한 번 다시 노출
+const WELCOME_KEY = "pm_onboarding_v2";
 const FONT_SCALE_KEY = "pm_font_scale";
 // 글자 크기(루트 폰트) 단계 — rem 기반 텍스트가 함께 커짐
 const FONT_MIN = 14;
@@ -1324,47 +1326,7 @@ export default function Home() {
         </div>
       )}
       {showWelcome && (
-        <FeatureTip
-          title="PaperMentor 사용 안내"
-          badge="처음 오셨나요?"
-          onClose={closeWelcome}
-          onNeverShow={neverShowWelcome}
-        >
-          <p className="text-[13px] text-zinc-500">
-            의학 논문을 단계별로 읽고 이해하도록 돕는 도구입니다. 화면은 세 부분으로 나뉩니다.
-          </p>
-          <ul className="space-y-2 text-[13px]">
-            <li className="flex gap-2">
-              <span>📄</span>
-              <span>
-                <span className="font-semibold text-zinc-800">왼쪽 — 논문 올리기 / 원문</span>
-                <br />
-                위쪽에서 PubMed ID·DOI를 넣거나 PDF를 끌어다 놓으면 분석이 시작돼요. 분석 후엔 같은 자리에 원문이 표시됩니다.
-              </span>
-            </li>
-            <li className="flex gap-2">
-              <span>📊</span>
-              <span>
-                <span className="font-semibold text-zinc-800">가운데 — 시각화 요약 + 핵심 요약</span>
-                <br />
-                분석하면 핵심 내용을 한눈에 보는 시각화 요약 이미지가 자동으로 만들어지고, 그 아래에 핵심 결과·배경·방법·결론이 정리돼요. 핵심 결과를 누르면 왼쪽 원문에서 근거 문장이 형광펜으로 표시됩니다.
-              </span>
-            </li>
-            {SHOW_RIGHT_PANEL && (
-              <li className="flex gap-2">
-                <span>🧭</span>
-                <span>
-                  <span className="font-semibold text-zinc-800">오른쪽 — 읽기 도구 탭</span>
-                  <br />
-                  읽기 가이드 · 배경지식 · 통계 해석 · 퀴즈 · Q&A를 탭에서 볼 수 있어요.
-                </span>
-              </li>
-            )}
-          </ul>
-          <p className="text-[12px] text-zinc-400">
-            이 안내는 가운데 상단의 <span className="font-medium text-zinc-500">? 사용 안내</span> 버튼으로 언제든 다시 볼 수 있어요.
-          </p>
-        </FeatureTip>
+        <Onboarding onClose={closeWelcome} onNeverShow={neverShowWelcome} />
       )}
       {showSourceTip && (
         <FeatureTip
