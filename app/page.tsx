@@ -38,7 +38,7 @@ type ChatMessage = {
   text: string;
 };
 
-type RightTab = "guide" | "background" | "translate" | "stats" | "qa" | "reliability" | "quiz" | "visualize";
+type RightTab = "guide" | "background" | "translate" | "stats" | "qa" | "reliability" | "quiz" | "visualize" | "slides";
 
 type Figure = { label: string; caption: string; srcs: string[] };
 
@@ -638,6 +638,14 @@ export default function Home() {
     "gemini" | "openai" | "flux" | "ideogram"
   >("gemini");
 
+  // 발표 슬라이드(.pptx) 다운로드 상태
+  const [slidesMode, setSlidesMode] = useState<null | "compose" | "llm">(null);
+  const [slidesError, setSlidesError] = useState<string | null>(null);
+  const [slidesRequirements, setSlidesRequirements] = useState("");
+  const [slidesResult, setSlidesResult] = useState<
+    { mode: "compose" | "llm"; slides: number; figures: number } | null
+  >(null);
+
   // 논문(메타+초록)을 받아 요약 생성 후 상태에 적재 — PMID/DOI 경로와 PDF 경로가 공유
   async function summarizeAndLoad(paper: PubMedPaper, pdfUrl?: string) {
     const summaryRes = await fetch("/api/summarize", {
@@ -682,6 +690,19 @@ export default function Home() {
     if (!loaded.translation) {
       handleTranslate(loaded);
     }
+    // 우측 읽기 도구 미리 생성(프리페치) — 탭 클릭 후 대기 제거.
+    // 각 핸들러는 (target.X || loading) 가드가 있어 중복 호출/이후 탭 클릭과 충돌하지 않음.
+    // 공용 계정 버스트 완화: 기본 탭(가이드)만 즉시, 나머지는 짧은 시차로 순차 실행(수 초 내 모두 준비).
+    handleGuide(loaded);
+    const prefetchRest = [
+      () => handleStatistics(loaded),
+      () => handleBackground(loaded),
+      () => handleReliability(loaded),
+      () => handleQuiz(loaded),
+    ];
+    prefetchRest.forEach((fn, i) => {
+      setTimeout(fn, 300 + i * 350 + Math.floor(Math.random() * 150));
+    });
 
     // 형광펜(원문 근거) 기능 첫 사용 안내 — source가 있는 결과가 있고, 아직 안 봤을 때 1회
     const hasSource = loaded.summary.keyFindings?.some((f) => f.source);
@@ -1041,6 +1062,58 @@ export default function Home() {
       setGeminiError(e instanceof Error ? e.message : "알 수 없는 오류");
     } finally {
       setGeminiLoading(false);
+    }
+  }
+
+  // 발표 슬라이드(.pptx) 생성·다운로드. compose=요약 그대로 조립, llm=AI 재구성.
+  async function downloadSlides(mode: "compose" | "llm") {
+    if (!loadedPaper || slidesMode) return;
+    setSlidesMode(mode);
+    setSlidesError(null);
+    setSlidesResult(null);
+    try {
+      const res = await fetch("/api/slides", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode,
+          paper: loadedPaper.paper,
+          summary: loadedPaper.summary,
+          statistics: loadedPaper.statistics ?? null,
+          background: loadedPaper.background ?? null,
+          // 추가 요구사항은 AI 재구성(llm) 모드에만 반영
+          requirements: mode === "llm" ? slidesRequirements.trim() : undefined,
+        }),
+      });
+      if (!res.ok) {
+        let msg = "슬라이드 생성에 실패했습니다.";
+        try {
+          msg = (await res.json()).error ?? msg;
+        } catch {
+          // 본문 파싱 실패 무시
+        }
+        throw new Error(msg);
+      }
+      const slideCount = Number(res.headers.get("X-Slide-Count")) || 0;
+      const figCount = Number(res.headers.get("X-Figure-Count")) || 0;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const cd = res.headers.get("Content-Disposition") ?? "";
+      const m = /filename\*=UTF-8''([^;]+)/.exec(cd);
+      a.download = m
+        ? decodeURIComponent(m[1])
+        : `발표슬라이드_${mode === "llm" ? "AI재구성" : "요약조립"}.pptx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setSlidesResult({ mode, slides: slideCount, figures: figCount });
+    } catch (e) {
+      setSlidesError(e instanceof Error ? e.message : "알 수 없는 오류");
+    } finally {
+      setSlidesMode(null);
     }
   }
 
@@ -2024,6 +2097,7 @@ export default function Home() {
                 { key: "stats", label: "통계 해석" },
                 { key: "quiz", label: "퀴즈" },
                 { key: "qa", label: "Q&A" },
+                { key: "slides", label: "발표 슬라이드" },
                 // 시각화 → 중앙으로 이동, 신뢰도·의학용어 해석 → 일시 비활성화 (코드/탭 렌더는 아래 보존)
               ] as { key: RightTab; label: string }[]
             ).map(({ key, label }) => (
@@ -2684,6 +2758,87 @@ export default function Home() {
                     </p>
                   )}
                 </div>
+              </div>
+            )}
+          </div>
+        )}
+        {activeTab === "slides" && (
+          <div className="flex-1 overflow-y-auto p-4">
+            {!loadedPaper ? (
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
+                <p>발표 슬라이드 탭</p>
+                <p className="text-xs mt-2">좌측에서 논문을 먼저 분석하세요</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <p className="text-xs leading-relaxed text-slate-500">
+                  분석한 논문을 발표용 슬라이드(.pptx)로 내려받습니다. 원문에 그림이 있으면
+                  원본 캡션과 함께 자동으로 포함됩니다.
+                </p>
+
+                {/* 요약 그대로 — 조립(무 LLM) */}
+                <div className="rounded-xl border border-slate-200 bg-white p-3.5">
+                  <div className="text-[13px] font-semibold text-slate-700">요약 그대로</div>
+                  <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+                    분석한 요약·통계·그림을 그대로 조립합니다. AI 생성 없이 만들어 원문 분석과 내용이 같습니다.
+                  </p>
+                  <button
+                    onClick={() => downloadSlides("compose")}
+                    disabled={slidesMode !== null}
+                    className="mt-2.5 w-full rounded-lg bg-slate-800 px-3 py-2 text-[13px] font-medium text-white transition-colors hover:bg-slate-700 disabled:opacity-50"
+                  >
+                    {slidesMode === "compose" ? "생성 중…" : "요약 그대로 (.pptx)"}
+                  </button>
+                </div>
+
+                {/* AI 재구성 — 추가 요구사항 반영 */}
+                <div className="rounded-xl border border-slate-200 bg-white p-3.5">
+                  <div className="text-[13px] font-semibold text-slate-700">AI 재구성</div>
+                  <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+                    발표 흐름에 맞게 AI가 슬라이드를 재구성합니다. 근거 자료에 있는 내용만 사용하고 과장·비유 없이 담백하게 작성합니다.
+                  </p>
+                  <label className="mt-2.5 block text-[11px] font-medium text-slate-500">
+                    추가 요구사항 (선택)
+                  </label>
+                  <textarea
+                    value={slidesRequirements}
+                    onChange={(e) => setSlidesRequirements(e.target.value.slice(0, 500))}
+                    placeholder="예: 저널클럽 발표용, 통계 해석을 자세히 / 8장 이내로 / 방법보다 결과 중심으로"
+                    rows={3}
+                    className="mt-1 w-full resize-none rounded-lg border border-slate-200 bg-slate-50/60 px-2.5 py-2 text-[12px] text-slate-700 placeholder:text-slate-400 focus:border-teal-300 focus:outline-none focus:ring-1 focus:ring-teal-200"
+                  />
+                  <div className="mt-1 flex items-start justify-between gap-2">
+                    <span className="text-[10px] leading-tight text-slate-400">
+                      요구사항은 이 모드에만 반영됩니다. 담백·무할루시네이션 규칙이 항상 우선합니다.
+                    </span>
+                    <span className="shrink-0 text-[10px] tabular-nums text-slate-400">
+                      {slidesRequirements.length}/500
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => downloadSlides("llm")}
+                    disabled={slidesMode !== null}
+                    className="mt-2.5 w-full rounded-lg bg-teal-600 px-3 py-2 text-[13px] font-medium text-white transition-colors hover:bg-teal-700 disabled:opacity-50"
+                  >
+                    {slidesMode === "llm" ? "생성 중…" : "AI 재구성 (.pptx)"}
+                  </button>
+                </div>
+
+                {slidesError && (
+                  <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[12px] text-red-600">
+                    {slidesError}
+                  </div>
+                )}
+                {slidesResult && !slidesError && (
+                  <div className="rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 text-[12px] text-teal-700">
+                    {slidesResult.mode === "llm" ? "AI 재구성" : "요약 그대로"} 슬라이드{" "}
+                    {slidesResult.slides}장
+                    {slidesResult.figures > 0
+                      ? ` · 원문 그림 ${slidesResult.figures}장 포함`
+                      : " · 포함된 원문 그림 없음"}{" "}
+                    — 다운로드됨
+                  </div>
+                )}
               </div>
             )}
           </div>
