@@ -139,7 +139,7 @@ const STEPS: Step[] = [
       <>
         <p>
           <b className="font-semibold text-zinc-800">용어 해설</b> — 가운데 위 용어 해설을 켜고,
-          모르는 단어나 구절을 드래그하면 그 자리에서 뜻풀이가 나옵니다.
+          모르는 단어를 탭(데스크톱은 드래그)하면 그 자리에서 뜻풀이가 나옵니다.
         </p>
         <p>
           <b className="font-semibold text-zinc-800">내 서재</b> — 로그인하면 분석한 논문을 저장하고

@@ -341,6 +341,64 @@ function renderRich(
   return <>{nodes}</>;
 }
 
+type CaretDoc = {
+  caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  caretPositionFromPoint?: (
+    x: number,
+    y: number,
+  ) => { offsetNode: Node; offset: number } | null;
+};
+
+// 화면 좌표(x,y)에 있는 '단어'(공백·구두점 사이 토큰)를 찾아 해설 대상으로 반환.
+// 모바일 탭용 — 드래그 선택 대신 손가락으로 짚은 단어를 잡는다. data-explain 밖이면 null.
+function wordAtPoint(
+  x: number,
+  y: number,
+): { term: string; rect: DOMRect; block: Element | null } | null {
+  const doc = document as unknown as CaretDoc;
+  let node: Node | null = null;
+  let offset = 0;
+  if (doc.caretRangeFromPoint) {
+    const r = doc.caretRangeFromPoint(x, y);
+    if (r) {
+      node = r.startContainer;
+      offset = r.startOffset;
+    }
+  } else if (doc.caretPositionFromPoint) {
+    const p = doc.caretPositionFromPoint(x, y);
+    if (p) {
+      node = p.offsetNode;
+      offset = p.offset;
+    }
+  }
+  if (!node || node.nodeType !== Node.TEXT_NODE) return null;
+  const el = node.parentElement;
+  if (!el || !el.closest("[data-explain]")) return null;
+  const text = node.textContent ?? "";
+  if (!text) return null;
+  const isWord = (ch: string | undefined) =>
+    !!ch && !/[\s.,;:!?()[\]{}"“”'·…]/.test(ch);
+  let s = Math.min(Math.max(offset, 0), text.length);
+  let e = s;
+  // caret가 단어 끝 경계에 걸리면 왼쪽 단어를 잡는다
+  if (!isWord(text[s]) && isWord(text[s - 1])) {
+    s -= 1;
+    e = s;
+  }
+  while (s > 0 && isWord(text[s - 1])) s -= 1;
+  while (e < text.length && isWord(text[e])) e += 1;
+  const term = text.slice(s, e).trim();
+  if (!term) return null;
+  const range = document.createRange();
+  range.setStart(node, s);
+  range.setEnd(node, e);
+  const rect = range.getBoundingClientRect();
+  const block = el.closest(
+    "[data-explain] p, [data-explain] li, [data-explain] article",
+  );
+  return { term, rect, block };
+}
+
 export default function Home() {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<RightTab>("guide");
@@ -554,44 +612,18 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, loadedPaper?.paper.pmid]);
 
-  // 용어 해설 모드: data-explain 영역에서 텍스트 선택 시 해당 부분 해설 생성
+  // 용어 해설 모드: 데스크톱은 드래그 선택, 모바일은 탭(또는 롱프레스 선택)으로 해설 생성
   useEffect(() => {
     if (!explainMode) return;
-    async function onMouseUp() {
-      const sel = window.getSelection();
-      if (!sel || sel.isCollapsed) {
-        setExplainPopup(null); // 빈 클릭이면 팝업 닫기
-        return;
-      }
-      const term = sel.toString().trim();
-      if (term.length < 2 || term.length > 120) return;
-      const node = sel.anchorNode;
-      const el = (node instanceof Element ? node : node?.parentElement) ?? null;
-      const region = el?.closest("[data-explain]");
-      if (!region) return;
-      const rect = sel.getRangeAt(0).getBoundingClientRect();
-      const block = el?.closest(
-        "[data-explain] p, [data-explain] li, [data-explain] article",
-      );
-      const context = (block?.textContent || region.textContent || "").slice(
-        0,
-        600,
-      );
-      const x = Math.min(
-        Math.max(rect.left + rect.width / 2, 160),
-        window.innerWidth - 160,
-      );
-      const y = rect.bottom + 8;
-      setExplainPopup({ x, y, term, loading: true, text: "", error: "" });
+
+    async function trigger(term: string, context: string, cx: number, cy: number) {
+      const x = Math.min(Math.max(cx, 160), window.innerWidth - 160);
+      setExplainPopup({ x, y: cy, term, loading: true, text: "", error: "" });
       try {
         const res = await fetch("/api/explain-term", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            term,
-            context,
-            title: loadedPaper?.paper.title,
-          }),
+          body: JSON.stringify({ term, context, title: loadedPaper?.paper.title }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error ?? "해설 생성에 실패했습니다.");
@@ -607,8 +639,80 @@ export default function Home() {
         );
       }
     }
+
+    // 현재 선택(드래그/롱프레스)이 유효하면 해설 대상으로 삼는다. 처리했으면 true.
+    function fromSelection(): boolean {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) return false;
+      const term = sel.toString().trim();
+      if (term.length < 2 || term.length > 120) return false;
+      const node = sel.anchorNode;
+      const el = (node instanceof Element ? node : node?.parentElement) ?? null;
+      const region = el?.closest("[data-explain]");
+      if (!region) return false;
+      const rect = sel.getRangeAt(0).getBoundingClientRect();
+      const block = el?.closest(
+        "[data-explain] p, [data-explain] li, [data-explain] article",
+      );
+      const context = (block?.textContent || region.textContent || "").slice(0, 600);
+      trigger(term, context, rect.left + rect.width / 2, rect.bottom + 8);
+      return true;
+    }
+
+    let lastTouch = 0;
+
+    function onMouseUp() {
+      if (Date.now() - lastTouch < 800) return; // 터치 후 합성되는 마우스 이벤트 무시
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) {
+        setExplainPopup(null); // 빈 클릭이면 팝업 닫기
+        return;
+      }
+      fromSelection();
+    }
+
+    // 탭 vs 스크롤 구분용 시작 좌표
+    let sx = 0;
+    let sy = 0;
+    let moved = false;
+    function onTouchStart(e: TouchEvent) {
+      const t = e.touches[0];
+      if (!t) return;
+      sx = t.clientX;
+      sy = t.clientY;
+      moved = false;
+    }
+    function onTouchMove(e: TouchEvent) {
+      const t = e.touches[0];
+      if (!t) return;
+      if (Math.abs(t.clientX - sx) > 10 || Math.abs(t.clientY - sy) > 10) moved = true;
+    }
+    function onTouchEnd(e: TouchEvent) {
+      lastTouch = Date.now();
+      if (moved) return; // 스크롤 제스처는 무시
+      if (fromSelection()) return; // 롱프레스로 구절을 선택했으면 그걸 사용
+      const t = e.changedTouches[0];
+      if (!t) return;
+      const hit = wordAtPoint(t.clientX, t.clientY); // 손가락으로 짚은 단어
+      if (!hit) {
+        setExplainPopup(null);
+        return;
+      }
+      if (hit.term.length < 2 || hit.term.length > 120) return;
+      const context = (hit.block?.textContent || "").slice(0, 600);
+      trigger(hit.term, context, hit.rect.left + hit.rect.width / 2, hit.rect.bottom + 8);
+    }
+
     document.addEventListener("mouseup", onMouseUp);
-    return () => document.removeEventListener("mouseup", onMouseUp);
+    document.addEventListener("touchstart", onTouchStart, { passive: true });
+    document.addEventListener("touchmove", onTouchMove, { passive: true });
+    document.addEventListener("touchend", onTouchEnd);
+    return () => {
+      document.removeEventListener("mouseup", onMouseUp);
+      document.removeEventListener("touchstart", onTouchStart);
+      document.removeEventListener("touchmove", onTouchMove);
+      document.removeEventListener("touchend", onTouchEnd);
+    };
   }, [explainMode, loadedPaper]);
 
   const [chatInput, setChatInput] = useState("");
@@ -1779,9 +1883,9 @@ export default function Home() {
                     ? "border-blue-600 bg-blue-600 text-white"
                     : "border-zinc-200 text-zinc-500 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-600"
                 }`}
-                title="켜면 요약·원문에서 모르는 부분을 드래그할 때 해설이 나옵니다"
+                title="켜면 모르는 단어를 탭(데스크톱은 드래그)할 때 해설이 나옵니다"
               >
-                💬 용어 해설 {explainMode ? "ON" : "OFF"}
+                용어 해설 {explainMode ? "ON" : "OFF"}
               </button>
               <button
                 onClick={() => setShowWelcome(true)}
@@ -1844,7 +1948,7 @@ export default function Home() {
         <div className="flex-1 overflow-y-auto bg-slate-50/60 p-6" data-explain>
           {explainMode && loadedPaper && (
             <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700">
-              💬 용어 해설 모드 — 요약이나 왼쪽 원문에서 <b>모르는 단어·구절을 드래그</b>하면 그 부분 해설이 떠요.
+              용어 해설 모드 — 요약이나 왼쪽 원문에서 <b>모르는 단어를 탭</b>하면 (데스크톱은 구절을 드래그해도) 해설이 떠요.
             </div>
           )}
           {paperLoading ? (
