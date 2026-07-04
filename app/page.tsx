@@ -2051,7 +2051,7 @@ export default function Home() {
             }`}
           >
         <div className="border-b border-slate-200 bg-slate-50/60">
-          <div className="flex overflow-x-auto scrollbar-none px-1.5 pt-1.5">
+          <div className="flex overflow-x-auto scrollbar-none px-1 pt-1.5">
             {(
               [
                 { key: "guide", label: "읽기 가이드" },
@@ -2067,7 +2067,7 @@ export default function Home() {
                 key={key}
                 onClick={() => handleTabChange(key)}
                 disabled={!loadedPaper}
-                className={`shrink-0 rounded-t-lg px-3.5 py-2.5 text-[13px] font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                className={`shrink-0 whitespace-nowrap rounded-t-lg px-2 py-2 text-[12px] font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
                   activeTab === key
                     ? "bg-white text-blue-600 shadow-[0_-2px_0_inset_rgba(37,99,235,1)]"
                     : "text-slate-500 hover:bg-white/60 hover:text-slate-700"
@@ -2757,7 +2757,7 @@ export default function Home() {
                 <div className="rounded-xl border border-slate-200 bg-white p-3.5">
                   <div className="text-[13px] font-semibold text-slate-700">AI 재구성</div>
                   <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
-                    발표 흐름에 맞게 AI가 슬라이드를 재구성합니다. 근거 자료에 있는 내용만 사용하고 과장·비유 없이 담백하게 작성합니다.
+                    논문 내용과 요약을 바탕으로 AI가 발표용으로 재구성합니다. 원문에 없는 내용은 넣지 않습니다.
                   </p>
                   <label className="mt-2.5 block text-[11px] font-medium text-slate-500">
                     추가 요구사항 (선택)
@@ -2771,7 +2771,7 @@ export default function Home() {
                   />
                   <div className="mt-1 flex items-start justify-between gap-2">
                     <span className="text-[10px] leading-tight text-slate-400">
-                      요구사항은 이 모드에만 반영됩니다. 담백·무할루시네이션 규칙이 항상 우선합니다.
+                      요구사항은 이 모드에만 반영됩니다. 항상 원문 내용에 근거해 작성됩니다.
                     </span>
                     <span className="shrink-0 text-[10px] tabular-nums text-slate-400">
                       {slidesRequirements.length}/500
