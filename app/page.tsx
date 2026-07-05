@@ -782,7 +782,9 @@ export default function Home() {
     setQuizAnswers({});
     setActiveTab("guide");
     setSearchOpen(false);
-    setOriginalView(pdfUrl ? "pdf" : "text");
+    // PMC 전문(bodyText+그림)이 있으면 가독성이 더 좋은 텍스트 뷰를 기본으로.
+    // 없을 때만 업로드한 PDF를 기본으로 보여준다.
+    setOriginalView(paper.bodyText ? "text" : pdfUrl ? "pdf" : "text");
     setRecentPapers((prev) => {
       const without = prev.filter((p) => p.paper.pmid !== paper.pmid);
       return [loaded, ...without].slice(0, 10);
@@ -1695,7 +1697,13 @@ export default function Home() {
                             setQuizAnswers({});
                             setActiveTab("guide");
                             setSearchOpen(false);
-                            setOriginalView(item.pdfUrl ? "pdf" : "text");
+                            setOriginalView(
+                              item.paper.bodyText
+                                ? "text"
+                                : item.pdfUrl
+                                  ? "pdf"
+                                  : "text",
+                            );
                             if (!item.geminiImage) {
                               handleGenerateImage(item, "gemini");
                             }
@@ -1802,9 +1810,14 @@ export default function Home() {
                       </div>
                     </div>
 
-                    {loadedPaper.pdfUrl && (
+                    {loadedPaper.pdfUrl && !loadedPaper.paper.bodyText && (
                       <p className="mt-2 rounded-md bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
                         텍스트 모드는 AI가 추출한 발췌본입니다. 정확한 원문·그림은 📄 PDF 모드로 보세요.
+                      </p>
+                    )}
+                    {loadedPaper.pdfUrl && loadedPaper.paper.bodyText && (
+                      <p className="mt-2 rounded-md bg-emerald-50 px-2 py-1 text-[11px] text-emerald-700">
+                        PMC 오픈액세스 전문을 불러왔습니다. 업로드한 PDF 원본은 📄 PDF 모드에서 볼 수 있습니다.
                       </p>
                     )}
 
