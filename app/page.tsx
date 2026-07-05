@@ -1529,6 +1529,12 @@ export default function Home() {
             </button>
           </div>
           </div>
+          <a
+            href="/community"
+            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[12px] font-medium text-slate-600 transition-colors hover:border-blue-300 hover:text-blue-600"
+          >
+            이용후기
+          </a>
           <AuthStatus />
         </div>
       </header>

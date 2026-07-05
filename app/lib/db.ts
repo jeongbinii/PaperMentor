@@ -157,3 +157,79 @@ export async function isBookmarked(paperKey: string): Promise<boolean> {
     .limit(1);
   return !!(data && data.length);
 }
+
+// ── 이용후기·피드백 (공개 커뮤니티 리뷰 벽) ─────────────────────────
+export type ReviewRow = {
+  id: string;
+  user_id: string;
+  display_name: string;
+  rating: number | null;
+  category: string;
+  content: string;
+  created_at: string;
+};
+
+// 공개 리뷰 벽: 누구나 읽기. 최신순 최대 200개.
+export async function listReviews(): Promise<ReviewRow[]> {
+  const supabase = client();
+  if (!supabase) return [];
+  const { data, error } = await supabase
+    .from("reviews")
+    .select("id,user_id,display_name,rating,category,content,created_at")
+    .order("created_at", { ascending: false })
+    .limit(200);
+  if (error || !data) return [];
+  return data as ReviewRow[];
+}
+
+// 리뷰 작성(로그인 필요). 성공 여부·오류 메시지 반환.
+export async function addReview(input: {
+  display_name: string;
+  rating: number | null;
+  category: string;
+  content: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const supabase = client();
+  if (!supabase) return { ok: false, error: "저장소가 설정되지 않았습니다." };
+  const user_id = await uid(supabase);
+  if (!user_id) return { ok: false, error: "로그인이 필요합니다." };
+  const content = input.content.trim();
+  if (!content) return { ok: false, error: "내용을 입력해 주세요." };
+  const { error } = await supabase.from("reviews").insert({
+    user_id,
+    display_name: (input.display_name || "익명").trim().slice(0, 40) || "익명",
+    rating: input.rating ?? null,
+    category: input.category || "후기",
+    content: content.slice(0, 2000),
+  });
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
+
+// 본인 글만 삭제(RLS로도 강제됨).
+export async function deleteReview(id: string): Promise<boolean> {
+  const supabase = client();
+  if (!supabase) return false;
+  const user_id = await uid(supabase);
+  if (!user_id) return false;
+  const { error } = await supabase
+    .from("reviews")
+    .delete()
+    .eq("id", id)
+    .eq("user_id", user_id);
+  if (error) console.error("deleteReview 실패:", error.message);
+  return !error;
+}
+
+// 현재 로그인 사용자 id + 표시이름 기본값(구글 이름 → 없으면 이메일 앞부분). 비로그인이면 null.
+export async function currentUserInfo(): Promise<{ id: string; name: string } | null> {
+  const supabase = client();
+  if (!supabase) return null;
+  const { data } = await supabase.auth.getUser();
+  const u = data.user;
+  if (!u) return null;
+  const meta = (u.user_metadata ?? {}) as { full_name?: string; name?: string };
+  const name =
+    meta.full_name || meta.name || (u.email ? u.email.split("@")[0] : "사용자");
+  return { id: u.id, name };
+}

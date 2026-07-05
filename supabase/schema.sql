@@ -69,3 +69,33 @@ create policy bookmarks_delete_own on public.bookmarks
 -- 로그인 사용자 역할(authenticated)에만 부여 — 비로그인(anon)은 접근 불가.
 grant select, insert, update, delete on public.analyses to authenticated;
 grant select, insert, delete on public.bookmarks to authenticated;
+
+-- ── 이용후기·피드백 (공개 커뮤니티 리뷰 벽) ─────────────────────────
+-- 읽기는 누구나(비로그인 포함), 작성·삭제는 로그인 본인만.
+create table if not exists public.reviews (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  display_name text not null default '익명',
+  rating int check (rating between 1 and 5),   -- 선택(별점 없이도 작성 가능)
+  category text not null default '후기',         -- 후기 | 버그 | 제안
+  content text not null check (char_length(content) between 1 and 2000),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists reviews_created_idx on public.reviews (created_at desc);
+
+alter table public.reviews enable row level security;
+
+drop policy if exists reviews_select_all on public.reviews;
+drop policy if exists reviews_insert_own on public.reviews;
+drop policy if exists reviews_delete_own on public.reviews;
+create policy reviews_select_all on public.reviews
+  for select using (true);                       -- 공개 벽: 누구나 읽기
+create policy reviews_insert_own on public.reviews
+  for insert with check (auth.uid() = user_id);  -- 본인 명의로만 작성
+create policy reviews_delete_own on public.reviews
+  for delete using (auth.uid() = user_id);       -- 본인 글만 삭제
+
+-- 공개 읽기라 anon 에게도 select 부여, 작성/삭제는 로그인 사용자만.
+grant select on public.reviews to anon, authenticated;
+grant insert, delete on public.reviews to authenticated;
