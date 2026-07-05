@@ -133,13 +133,25 @@ function statsBody(s: Slide, p: Pptx, items: { metric: string; value: string; me
   });
 }
 
-function figureBody(s: Slide, data: string, caption: string): void {
-  // 원본 그림 최대 활용: 종횡비 보존(contain)으로 넓게 배치
-  s.addImage({ data, x: 1.0, y: 1.6, w: 8.0, h: 3.0, sizing: { type: "contain", w: 8.0, h: 3.0 } });
-  if (caption) {
-    s.addText(clipW(caption, 230), {
-      x: 0.7, y: 4.72, w: 8.6, h: 0.5, fontSize: 10, color: MUTED, fontFace: F, valign: "top", margin: 0, lineSpacingMultiple: 1.02, fit: "shrink",
+function figureBody(s: Slide, data: string, caption: string, points?: string[]): void {
+  if (points && points.length) {
+    // AI 재구성: 그림 + 발표용 한국어 설명 불릿(원문 캡션을 담백하게 distill)
+    s.addImage({ data, x: 1.2, y: 1.5, w: 7.6, h: 2.5, sizing: { type: "contain", w: 7.6, h: 2.5 } });
+    const items = points.slice(0, 3).map((b) => ({
+      text: clipW(b, 220),
+      options: { bullet: { code: "2022" }, paraSpaceAfter: 6, color: INK },
+    }));
+    s.addText(items, {
+      x: 0.7, y: 4.14, w: 8.6, h: BODY_BOTTOM - 4.14, fontSize: 12.5, color: INK, fontFace: F, valign: "top", margin: 0, lineSpacingMultiple: 1.05, fit: "shrink",
     });
+  } else {
+    // 설명 없음(compose 조립 등) → 원본 캡션을 넉넉히
+    s.addImage({ data, x: 1.0, y: 1.55, w: 8.0, h: 2.95, sizing: { type: "contain", w: 8.0, h: 2.95 } });
+    if (caption) {
+      s.addText(clipW(caption, 360), {
+        x: 0.7, y: 4.6, w: 8.6, h: BODY_BOTTOM - 4.6, fontSize: 10.5, color: MUTED, fontFace: F, valign: "top", margin: 0, lineSpacingMultiple: 1.03, fit: "shrink",
+      });
+    }
   }
 }
 
@@ -155,7 +167,7 @@ function contentSlide(p: Pptx, spec: SlideSpec, page: number, images: ImageMap):
     else if (body.kind === "stats") statsBody(s, p, body.items);
     else if (body.kind === "figure") {
       const data = images[body.imageKey];
-      if (data) figureBody(s, data, body.caption);
+      if (data) figureBody(s, data, body.caption, body.points);
     }
   }
   footer(s, page);

@@ -9,6 +9,7 @@ import {
   MAX_FIGURES,
   metaFrom,
   type DeckPlan,
+  type SlideBody,
   type SlideSource,
   type SlideSpec,
 } from "@/app/lib/slidePlan";
@@ -89,6 +90,73 @@ function insertFiguresAfterResults(slides: SlideSpec[], figs: SlideSpec[]): Slid
   return [...slides.slice(0, insertAt), ...figs, ...slides.slice(insertAt)];
 }
 
+// 그림 캡션(원문)을 발표용 한국어 설명 불릿으로 distill. 캡션에 있는 내용만 사용(무할루시네이션).
+// 반환은 입력 그림과 같은 순서·개수. 실패/캡션 전무 시 모두 빈 배열.
+async function explainFigures(
+  items: { label: string; caption: string }[],
+  context: string,
+): Promise<string[][]> {
+  const empty = items.map(() => [] as string[]);
+  if (!items.length || !items.some((it) => it.caption.trim())) return empty;
+
+  const list = items
+    .map(
+      (it, i) =>
+        `[${i}] ${it.label || `Figure ${i + 1}`}\n캡션: ${
+          it.caption.trim().slice(0, 700) || "(캡션 없음)"
+        }`,
+    )
+    .join("\n\n");
+
+  const system = `당신은 의학 논문의 그림을 발표 청중에게 설명하는 전문가입니다.
+각 그림의 "원문 캡션"만 근거로, 그 그림이 무엇을 보여주는지 담백한 한국어로 정리합니다.
+
+[규칙]
+- 캡션에 실제로 있는 내용만 사용하십시오(할루시네이션 금지). 캡션에 없는 수치·결론을 지어내지 마십시오.
+- 비유·은유·과장 형용사 금지. 사실 평서문만 사용합니다.
+- 각 그림당 1~3개의 짧은 불릿(각 대략 45자 이내). "무엇을 보여주는 그림인지 + 핵심 관찰" 위주.
+- 패널(A·B·C…)이 있으면 각 패널이 무엇을 비교·측정하는지 간결히 요약하십시오.
+- 캡션이 비어 있으면 그 그림의 points는 빈 배열([])로 두십시오.
+- [연구 맥락]은 이해를 돕는 배경일 뿐입니다. 캡션에 없는 내용을 채우는 근거로 쓰지 마십시오.
+
+[출력 — 아래 JSON만]
+{ "figures": [ { "points": ["문장1", "문장2"] } ] }
+figures 배열의 순서·개수를 입력 그림과 정확히 일치시키십시오.`;
+
+  const user = `[연구 맥락]\n${(context || "").slice(0, 1500)}\n\n[그림 목록]\n${list}`;
+
+  try {
+    const resp = await client.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 2048,
+      system,
+      messages: [{ role: "user", content: user }],
+    });
+    const text = resp.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("\n");
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start === -1 || end === -1) return empty;
+    const parsed = JSON.parse(text.slice(start, end + 1)) as {
+      figures?: { points?: unknown }[];
+    };
+    if (!Array.isArray(parsed.figures)) return empty;
+    return items.map((_, i) => {
+      const pts = parsed.figures?.[i]?.points;
+      return Array.isArray(pts)
+        ? pts
+            .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+            .map((p) => p.trim())
+            .slice(0, 3)
+        : [];
+    });
+  } catch {
+    return empty;
+  }
+}
+
 // AI 재구성 모드: 근거 자료만으로 발표 슬라이드 텍스트 생성(무할루시네이션·담백). 그림 슬라이드는 코드가 배치.
 // requirements: 사용자 추가 요청(선택). 절대 규칙 아래에서만 반영한다.
 async function llmPlan(src: SlideSource, requirements?: string): Promise<DeckPlan> {
@@ -151,15 +219,34 @@ async function llmPlan(src: SlideSource, requirements?: string): Promise<DeckPla
 요청: "${reqClean}"`
     : baseSystem;
 
+  // 그림 설명(캡션 distill)은 슬라이드 텍스트 생성과 독립적 → 병렬 실행(함수 60s 한도 여유).
+  const figSlides = figureSlides(paper);
+  const figBodies = figSlides.filter(
+    (s): s is SlideSpec & { body: Extract<SlideBody, { kind: "figure" }> } =>
+      s.body?.kind === "figure",
+  );
+  const figContext = [
+    summary.results,
+    (summary.keyFindings ?? []).map((f) => f.claim).join(" "),
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   // 여러 슬라이드를 한 번에 생성하므로 스트리밍으로 받아 요청 레벨 타임아웃을 피한다.
-  const resp = await client.messages
-    .stream({
-      model: "claude-sonnet-4-6",
-      max_tokens: 4096,
-      system,
-      messages: [{ role: "user", content: grounding }],
-    })
-    .finalMessage();
+  const [resp, explanations] = await Promise.all([
+    client.messages
+      .stream({
+        model: "claude-sonnet-4-6",
+        max_tokens: 4096,
+        system,
+        messages: [{ role: "user", content: grounding }],
+      })
+      .finalMessage(),
+    explainFigures(
+      figBodies.map((s) => ({ label: s.title, caption: s.body.caption })),
+      figContext,
+    ),
+  ]);
 
   const text = resp.content
     .filter((b): b is Anthropic.TextBlock => b.type === "text")
@@ -170,7 +257,14 @@ async function llmPlan(src: SlideSource, requirements?: string): Promise<DeckPla
   // 파싱 실패/빈 결과(또는 max_tokens 절단) → 결정적 무할루시네이션 경로로 폴백.
   if (slides.length === 0) return composePlan(src);
 
-  return { meta: metaFrom(paper), slides: insertFiguresAfterResults(slides, figureSlides(paper)) };
+  // 그림 슬라이드 body에 설명 부여(figSlides 객체가 그대로 deck에 배치되므로 반영됨).
+  figBodies.forEach((s, i) => {
+    if (explanations[i]?.length) s.body.points = explanations[i];
+  });
+  return {
+    meta: metaFrom(paper),
+    slides: insertFiguresAfterResults(slides, figSlides),
+  };
 }
 
 function parseLlmSlides(text: string): SlideSpec[] {

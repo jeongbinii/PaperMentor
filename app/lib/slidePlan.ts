@@ -12,7 +12,7 @@ export type SlideBody =
   | { kind: "bullets"; bullets: string[] }
   | { kind: "keyFindings"; items: KFRow[] }
   | { kind: "stats"; items: StatRow[] }
-  | { kind: "figure"; imageKey: string; caption: string }
+  | { kind: "figure"; imageKey: string; caption: string; points?: string[] }
   | { kind: "text"; text: string };
 
 export type SlideSpec = {
