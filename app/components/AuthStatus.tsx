@@ -41,7 +41,7 @@ export default function AuthStatus() {
     return (
       <a
         href="/login"
-        className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[12px] font-medium text-slate-600 transition-colors hover:border-blue-300 hover:text-blue-600"
+        className="rounded-lg bg-blue-600 px-3.5 py-1.5 text-[12px] font-semibold text-white shadow-sm transition-colors hover:bg-blue-700"
       >
         로그인
       </a>
@@ -52,7 +52,7 @@ export default function AuthStatus() {
     <div className="flex items-center gap-2">
       <a
         href="/library"
-        className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[12px] font-medium text-slate-600 transition-colors hover:border-blue-300 hover:text-blue-600"
+        className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[12px] font-semibold text-slate-700 shadow-sm transition-colors hover:border-blue-400 hover:bg-blue-50 hover:text-blue-700"
       >
         내 서재
       </a>
@@ -65,7 +65,7 @@ export default function AuthStatus() {
       <form action="/auth/signout" method="post">
         <button
           type="submit"
-          className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[12px] font-medium text-slate-500 transition-colors hover:border-slate-300 hover:text-slate-700"
+          className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[12px] font-medium text-slate-600 shadow-sm transition-colors hover:border-slate-400 hover:text-slate-800"
         >
           로그아웃
         </button>

@@ -1531,7 +1531,7 @@ export default function Home() {
           </div>
           <a
             href="/community"
-            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[12px] font-medium text-slate-600 transition-colors hover:border-blue-300 hover:text-blue-600"
+            className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-[12px] font-semibold text-blue-700 shadow-sm transition-colors hover:border-blue-300 hover:bg-blue-100"
           >
             이용후기
           </a>
@@ -2180,7 +2180,7 @@ export default function Home() {
                 className={`shrink-0 whitespace-nowrap rounded-t-lg px-2 py-2 text-[12px] font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
                   activeTab === key
                     ? "bg-white text-blue-600 shadow-[0_-2px_0_inset_rgba(37,99,235,1)]"
-                    : "text-slate-500 hover:bg-white/60 hover:text-slate-700"
+                    : "text-slate-600 hover:bg-white/60 hover:text-slate-800"
                 }`}
               >
                 {label}
