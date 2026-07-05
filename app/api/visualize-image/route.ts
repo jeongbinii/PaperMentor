@@ -23,13 +23,18 @@ export type ImageProvider = "gemini" | "openai" | "flux" | "ideogram";
 
 type KeyFinding = { claim?: string; evidence?: string };
 
-function buildPrompt(body: {
-  title?: string;
-  keyFindings?: KeyFinding[];
-  methods?: string;
-  results?: string;
-  conclusion?: string;
-}): string {
+// labelLang: 그림에 렌더링할 라벨 언어. "ko"=Gemini(한글 렌더링 우수),
+// "en"=GPT 등(한글이 깨지는 모델 → 영어 라벨로 우회).
+function buildPrompt(
+  body: {
+    title?: string;
+    keyFindings?: KeyFinding[];
+    methods?: string;
+    results?: string;
+    conclusion?: string;
+  },
+  labelLang: "ko" | "en",
+): string {
   const { title, keyFindings, methods, results, conclusion } = body;
   const kf = Array.isArray(keyFindings)
     ? keyFindings
@@ -48,6 +53,18 @@ function buildPrompt(body: {
   ]
     .filter(Boolean)
     .join("\n\n");
+
+  if (labelLang === "en") {
+    // 원문 데이터는 한글이므로, 라벨은 영어로 번역해 그리라고 명시(한글 렌더링 깨짐 회피).
+    return `${paperText}
+
+Create a single graphical-abstract style summary image that captures the content above at a glance. The source text is in Korean — translate any labels you draw into clear, correctly spelled English. Draw the image itself, not explanatory prose.
+
+[Style rules]
+- Use restrained color. Realistic coloring of organs, cells, patient groups, or devices is allowed, but do not add colorful highlights merely for emphasis; keep backgrounds, shapes, and arrows mostly white, gray, and one or two pale tones.
+- Never put a journal name ("NEJM" etc.) or watermark text such as "graphical abstract" in the image.
+- All labels and text must be in clear, correctly spelled English, kept to the necessary minimum. Do not render any Korean characters.`;
+  }
 
   return `${paperText}
 
@@ -209,7 +226,6 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json();
-    const prompt = buildPrompt(body);
 
     // 요청한 provider (없으면 자동: gemini→openai→flux 순으로 가능한 것)
     const requested = typeof body.provider === "string" ? body.provider : "";
@@ -217,6 +233,9 @@ export async function POST(request: Request) {
       requested ||
       (geminiKey ? "gemini" : openaiKey ? "openai" : "flux")
     ) as ImageProvider;
+
+    // 한글 렌더링이 우수한 Gemini만 한글 라벨, 나머지(GPT 등)는 영어 라벨로 우회.
+    const prompt = buildPrompt(body, provider === "gemini" ? "ko" : "en");
 
     const keyMissing = (label: string) =>
       NextResponse.json(
