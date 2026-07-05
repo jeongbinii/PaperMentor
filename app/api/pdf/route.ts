@@ -1,21 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { NextResponse } from "next/server";
+import { enrichFromPdfIdentifiers, type PubMedPaper } from "@/app/lib/ncbi";
 
 const client = new Anthropic();
 
 // Anthropic PDF 입력 한도: 32MB / 100페이지
 const MAX_PDF_BYTES = 32 * 1024 * 1024;
-
-export type PubMedPaper = {
-  pmid: string;
-  title: string;
-  abstract: string;
-  authors: string[];
-  journal: string;
-  pubdate: string;
-  doi: string | null;
-  fullText: string;
-};
 
 const SYSTEM_PROMPT = `당신은 업로드된 의학 논문 PDF에서 서지정보·초록과 분석에 필요한 본문 핵심(방법·결과)을 추출하는 도우미입니다.
 PDF 본문을 읽고 지정된 형식으로 추출합니다.
@@ -32,6 +22,8 @@ PDF 본문을 읽고 지정된 형식으로 추출합니다.
 - journal: 저널/학술지명. 없으면 빈 문자열.
 - pubdate: 출판 연도 또는 날짜 (예: "2023" 또는 "2023 May"). 없으면 빈 문자열.
 - doi: DOI 문자열 (예: "10.1056/NEJMoa2034577"). 없으면 null.
+- pmcid: PMC 식별자 (예: "PMC1234567"). 논문 첫 페이지·헤더·각주·워터마크에 있으면 그대로. 없으면 null.
+- pmid: PubMed ID(숫자만). 논문에 표기돼 있으면 그대로. 없으면 null.
 - methods: 논문 유형에 맞춰 "방법/접근"의 핵심을 본문 문장 그대로 발췌.
   · 임상연구: 연구설계, 대상·표본수, 그리고 일차결과(primary outcome/endpoint)가 무엇으로 정의됐는지.
   · 기전/기초실험: 사용한 실험 모델(세포주·동물모델), 다룬 물질·유전자, 실험 접근법(어떤 표적·경로를 어떻게 평가했는지).
@@ -59,6 +51,8 @@ const OUTPUT_SCHEMA = {
     journal: { type: "string" },
     pubdate: { type: "string" },
     doi: { type: ["string", "null"] },
+    pmcid: { type: ["string", "null"] },
+    pmid: { type: ["string", "null"] },
     methods: { type: "string" },
     results: { type: "string" },
   },
@@ -69,6 +63,8 @@ const OUTPUT_SCHEMA = {
     "journal",
     "pubdate",
     "doi",
+    "pmcid",
+    "pmid",
     "methods",
     "results",
   ],
@@ -82,6 +78,8 @@ type ExtractedPaper = {
   journal: string;
   pubdate: string;
   doi: string | null;
+  pmcid: string | null;
+  pmid: string | null;
   methods: string;
   results: string;
 };
@@ -98,6 +96,8 @@ function extractJson(text: string): ExtractedPaper {
     journal: typeof parsed.journal === "string" ? parsed.journal : "",
     pubdate: typeof parsed.pubdate === "string" ? parsed.pubdate : "",
     doi: typeof parsed.doi === "string" && parsed.doi.trim() ? parsed.doi : null,
+    pmcid: typeof parsed.pmcid === "string" && parsed.pmcid.trim() ? parsed.pmcid : null,
+    pmid: typeof parsed.pmid === "string" && parsed.pmid.trim() ? parsed.pmid : null,
     methods: typeof parsed.methods === "string" ? parsed.methods : "",
     results: typeof parsed.results === "string" ? parsed.results : "",
   };
@@ -164,6 +164,20 @@ export async function POST(request: Request) {
 
     const extracted = extractJson(text);
 
+    // PDF에 인쇄된 식별자(DOI·PMCID·PMID)로 PMC 오픈액세스 전문 보강을 먼저 시도한다.
+    // 성공하면 사이트(PMID/DOI) 경로와 동일하게 전체 본문·원문 그림을 갖춘 paper로 수렴 —
+    // 요약·시각화요약·발표슬라이드 품질이 경로와 무관하게 일정해진다.
+    // 실패(PMC 미수록·식별자 없음·제목 불일치)하면 아래 기존 PDF 추출 결과로 폴백.
+    const enriched = await enrichFromPdfIdentifiers({
+      doi: extracted.doi,
+      pmcid: extracted.pmcid,
+      pmid: extracted.pmid,
+      title: extracted.title,
+    });
+    if (enriched) {
+      return NextResponse.json({ paper: enriched, source: "pmc", usage: response.usage });
+    }
+
     if (!extracted.abstract) {
       return NextResponse.json(
         { error: "PDF에서 초록을 추출하지 못했습니다." },
@@ -194,7 +208,7 @@ export async function POST(request: Request) {
       fullText,
     };
 
-    return NextResponse.json({ paper, usage: response.usage });
+    return NextResponse.json({ paper, source: "pdf", usage: response.usage });
   } catch (error) {
     if (error instanceof Anthropic.APIError) {
       return NextResponse.json(
