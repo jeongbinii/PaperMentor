@@ -13,6 +13,7 @@ import {
   addBookmark,
   removeBookmark,
 } from "./lib/db";
+import { sniffPdfIdentifier } from "./lib/pdfSniff";
 
 // react-pdf는 브라우저 전용(pdf.js) → SSR 비활성화로 클라이언트에서만 로드
 const PdfViewer = dynamic(() => import("./components/PdfViewer"), {
@@ -915,6 +916,41 @@ export default function Home() {
   // Vercel 서버리스 함수 요청 본문 한도(4.5MB) 아래로 여유를 둔 업로드 상한
   const MAX_PDF_UPLOAD_BYTES = 4.3 * 1024 * 1024;
 
+  // 큰 PDF: 서버로 못 보냄 → 앞 페이지에서 식별자(DOI·PMCID·PMID)를 뽑아 식별자→PMC 경로로.
+  async function handleLargePdf(file: File) {
+    if (paperLoading) return;
+    setPaperLoading(true);
+    setPaperError(null);
+    try {
+      const id = await sniffPdfIdentifier(file);
+      if (!id) {
+        const mb = (file.size / (1024 * 1024)).toFixed(1);
+        throw new Error(
+          `이 PDF(${mb}MB)는 업로드 한도(약 4.5MB)를 넘고, 첫 페이지에서 DOI·PMCID도 찾지 못했습니다. 위 검색창에 PubMed ID·DOI·PMCID를 직접 입력해 주세요.`,
+        );
+      }
+      const pubmedRes = await fetch("/api/pubmed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: id }),
+      });
+      const data = await pubmedRes.json();
+      if (!pubmedRes.ok) {
+        throw new Error(
+          data.error ??
+            `PDF에서 식별자(${id})를 찾았지만 해당 논문을 불러오지 못했습니다.`,
+        );
+      }
+      // 업로드한 PDF를 좌측에 그대로 띄우되(objectURL), 내용은 식별자→PMC 결과 사용.
+      const pdfUrl = URL.createObjectURL(file);
+      await summarizeAndLoad(data as PubMedPaper, pdfUrl);
+    } catch (e) {
+      setPaperError(e instanceof Error ? e.message : "알 수 없는 오류");
+    } finally {
+      setPaperLoading(false);
+    }
+  }
+
   function acceptPdfFile(file: File | undefined | null) {
     if (!file) return;
     const isPdf =
@@ -924,10 +960,8 @@ export default function Home() {
       return;
     }
     if (file.size > MAX_PDF_UPLOAD_BYTES) {
-      const mb = (file.size / (1024 * 1024)).toFixed(1);
-      setPaperError(
-        `PDF가 너무 큽니다 (${mb}MB). 업로드 한도(약 4.5MB)를 초과해요. 같은 논문을 PubMed ID·DOI·PMCID로 검색하면 전문·그림을 받아올 수 있습니다.`,
-      );
+      // 큰 PDF는 앞 페이지 식별자로 PMC 경로 시도(업로드 회피)
+      void handleLargePdf(file);
       return;
     }
     handlePdfUpload(file);
