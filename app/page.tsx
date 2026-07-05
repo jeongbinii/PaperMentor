@@ -2041,14 +2041,43 @@ export default function Home() {
                   <h3 className="text-base font-semibold">
                     시각화 요약 (Graphical Abstract)
                   </h3>
-                  {(loadedPaper.geminiImage || geminiError) && !geminiLoading && (
-                    <button
-                      onClick={() => handleGenerateImage(loadedPaper, "gemini")}
-                      className="rounded-md border border-zinc-200 px-2.5 py-1 text-[11px] font-medium text-zinc-500 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-600"
-                    >
-                      다시 생성
-                    </button>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {/* 이미지 모델 선택: Gemini(한글 강함) / GPT(대안) */}
+                    <div className="flex items-center gap-1">
+                      {(
+                        [
+                          ["gemini", "Gemini"],
+                          ["openai", "GPT"],
+                        ] as const
+                      ).map(([key, label]) => (
+                        <button
+                          key={key}
+                          onClick={() => setImageProvider(key)}
+                          disabled={geminiLoading}
+                          title={
+                            key === "gemini"
+                              ? "Google Gemini — 한글 라벨 품질이 가장 좋음"
+                              : "OpenAI GPT (gpt-image-1) — Gemini 혼잡 시 대안"
+                          }
+                          className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-50 ${
+                            imageProvider === key
+                              ? "bg-blue-600 text-white"
+                              : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    {(loadedPaper.geminiImage || geminiError) && !geminiLoading && (
+                      <button
+                        onClick={() => handleGenerateImage(loadedPaper)}
+                        className="rounded-md border border-zinc-200 px-2.5 py-1 text-[11px] font-medium text-zinc-500 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-600"
+                      >
+                        다시 생성
+                      </button>
+                    )}
+                  </div>
                 </div>
                 {geminiLoading ? (
                   <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 py-10 text-sm text-zinc-400">
@@ -2064,7 +2093,7 @@ export default function Home() {
                     </div>
                     <div className="mb-2 text-xs">{geminiError}</div>
                     <button
-                      onClick={() => handleGenerateImage(loadedPaper, "gemini")}
+                      onClick={() => handleGenerateImage(loadedPaper)}
                       className="text-xs underline hover:text-red-800"
                     >
                       다시 시도
@@ -2097,7 +2126,7 @@ export default function Home() {
                       핵심 내용을 한눈에 보는 시각화 요약을 만들 수 있어요.
                     </span>
                     <button
-                      onClick={() => handleGenerateImage(loadedPaper, "gemini")}
+                      onClick={() => handleGenerateImage(loadedPaper)}
                       className="shrink-0 rounded-md bg-zinc-900 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-zinc-700"
                     >
                       이미지 생성
