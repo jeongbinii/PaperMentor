@@ -76,11 +76,15 @@ create table if not exists public.reviews (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users (id) on delete cascade,
   display_name text not null default '익명',
+  masked_email text,                            -- 신뢰도용 마스킹 이메일(예: mi•••@gmail.com). 원본은 저장 안 함.
   rating int check (rating between 1 and 5),   -- 선택(별점 없이도 작성 가능)
   category text not null default '후기',         -- 후기 | 버그 | 제안
   content text not null check (char_length(content) between 1 and 2000),
   created_at timestamptz not null default now()
 );
+
+-- 기존 테이블에도 컬럼 추가(재실행 안전)
+alter table public.reviews add column if not exists masked_email text;
 
 create index if not exists reviews_created_idx on public.reviews (created_at desc);
 

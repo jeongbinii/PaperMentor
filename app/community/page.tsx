@@ -8,6 +8,7 @@ import {
   addReview,
   deleteReview,
   currentUserInfo,
+  maskEmail,
   type ReviewRow,
 } from "@/app/lib/db";
 
@@ -38,7 +39,9 @@ function fmtDate(iso: string): string {
 export default function CommunityPage() {
   const [reviews, setReviews] = useState<ReviewRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [me, setMe] = useState<{ id: string; name: string } | null>(null);
+  const [me, setMe] = useState<{ id: string; name: string; email: string | null } | null>(
+    null,
+  );
   const [ready, setReady] = useState(false);
 
   // 작성 폼
@@ -185,6 +188,14 @@ export default function CommunityPage() {
               className="mt-3 w-full resize-none rounded-lg border border-slate-200 bg-slate-50/60 px-3 py-2 text-[14px] text-slate-700 placeholder:text-slate-400 focus:border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-200"
             />
 
+            {me?.email && (
+              <p className="mt-1.5 text-[11px] leading-relaxed text-slate-400">
+                신뢰도를 위해 이름과 함께{" "}
+                <b className="font-medium text-slate-500">{maskEmail(me.email)}</b> 형태로 마스킹된
+                이메일이 공개됩니다.
+              </p>
+            )}
+
             <div className="mt-2 flex items-center justify-between">
               <span className="text-[11px] tabular-nums text-slate-400">{content.length}/2000</span>
               <div className="flex items-center gap-3">
@@ -236,6 +247,11 @@ export default function CommunityPage() {
                   </span>
                   <Stars value={r.rating} />
                   <span className="text-[13px] font-medium text-slate-700">{r.display_name}</span>
+                  {r.masked_email && (
+                    <span className="text-[11px] text-slate-400" title="인증된 로그인 사용자">
+                      {r.masked_email}
+                    </span>
+                  )}
                   <span className="text-[11px] text-slate-400">{fmtDate(r.created_at)}</span>
                   {me && me.id === r.user_id && (
                     <button
