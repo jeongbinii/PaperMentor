@@ -133,20 +133,81 @@ function statsBody(s: Slide, p: Pptx, items: { metric: string; value: string; me
   });
 }
 
+// base64 data URI(image/xxx;base64,...)에서 원본 픽셀 크기 파싱. PNG·JPEG·GIF 지원. 실패 시 null.
+function imageAspect(dataUri: string): { w: number; h: number } | null {
+  const i = dataUri.indexOf("base64,");
+  if (i === -1) return null;
+  let buf: Buffer;
+  try {
+    buf = Buffer.from(dataUri.slice(i + 7), "base64");
+  } catch {
+    return null;
+  }
+  if (buf.length < 24) return null;
+  // PNG: IHDR의 width/height (big-endian, offset 16/20)
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+    return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+  }
+  // GIF: offset 6/8 (little-endian)
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) {
+    return { w: buf.readUInt16LE(6), h: buf.readUInt16LE(8) };
+  }
+  // JPEG: SOF 마커에서 height/width
+  if (buf[0] === 0xff && buf[1] === 0xd8) {
+    let off = 2;
+    while (off + 9 < buf.length) {
+      if (buf[off] !== 0xff) {
+        off++;
+        continue;
+      }
+      const marker = buf[off + 1];
+      if (
+        (marker >= 0xc0 && marker <= 0xc3) ||
+        (marker >= 0xc5 && marker <= 0xc7) ||
+        (marker >= 0xc9 && marker <= 0xcb) ||
+        (marker >= 0xcd && marker <= 0xcf)
+      ) {
+        return { h: buf.readUInt16BE(off + 5), w: buf.readUInt16BE(off + 7) };
+      }
+      const len = buf.readUInt16BE(off + 2);
+      if (len < 2) return null;
+      off += 2 + len;
+    }
+  }
+  return null;
+}
+
+type Box = { x: number; y: number; w: number; h: number };
+
+// 원본 비율을 유지하며 박스 안에 최대 크기로 중앙 배치. 치수 파싱 실패 시 contain 폴백.
+function fitImage(
+  data: string,
+  box: Box,
+): Box & { sizing?: { type: "contain"; w: number; h: number } } {
+  const dim = imageAspect(data);
+  if (!dim || dim.w <= 0 || dim.h <= 0) {
+    return { ...box, sizing: { type: "contain", w: box.w, h: box.h } };
+  }
+  const scale = Math.min(box.w / dim.w, box.h / dim.h);
+  const w = dim.w * scale;
+  const h = dim.h * scale;
+  return { x: box.x + (box.w - w) / 2, y: box.y + (box.h - h) / 2, w, h };
+}
+
 function figureBody(s: Slide, data: string, caption: string, points?: string[]): void {
   if (points && points.length) {
     // AI 재구성: 그림 + 발표용 한국어 설명 불릿(원문 캡션을 담백하게 distill)
-    s.addImage({ data, x: 1.2, y: 1.5, w: 7.6, h: 2.5, sizing: { type: "contain", w: 7.6, h: 2.5 } });
+    s.addImage({ data, ...fitImage(data, { x: 1.0, y: 1.5, w: 8.0, h: 2.55 }) });
     const items = points.slice(0, 3).map((b) => ({
       text: clipW(b, 220),
       options: { bullet: { code: "2022" }, paraSpaceAfter: 6, color: INK },
     }));
     s.addText(items, {
-      x: 0.7, y: 4.14, w: 8.6, h: BODY_BOTTOM - 4.14, fontSize: 12.5, color: INK, fontFace: F, valign: "top", margin: 0, lineSpacingMultiple: 1.05, fit: "shrink",
+      x: 0.7, y: 4.16, w: 8.6, h: BODY_BOTTOM - 4.16, fontSize: 12.5, color: INK, fontFace: F, valign: "top", margin: 0, lineSpacingMultiple: 1.05, fit: "shrink",
     });
   } else {
     // 설명 없음(compose 조립 등) → 원본 캡션을 넉넉히
-    s.addImage({ data, x: 1.0, y: 1.55, w: 8.0, h: 2.95, sizing: { type: "contain", w: 8.0, h: 2.95 } });
+    s.addImage({ data, ...fitImage(data, { x: 0.9, y: 1.55, w: 8.2, h: 2.95 }) });
     if (caption) {
       s.addText(clipW(caption, 360), {
         x: 0.7, y: 4.6, w: 8.6, h: BODY_BOTTOM - 4.6, fontSize: 10.5, color: MUTED, fontFace: F, valign: "top", margin: 0, lineSpacingMultiple: 1.03, fit: "shrink",
