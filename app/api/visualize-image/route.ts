@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 
+export const runtime = "nodejs";
+export const maxDuration = 60; // Pro 모델 시도 + 폴백 시도 여유
+
 // 이미지 생성 제공자: 환경변수에 있는 키로 자동 선택 (OpenAI 우선, 없으면 Gemini).
 // 모델은 OPENAI_IMAGE_MODEL / GEMINI_IMAGE_MODEL 로 교체 가능.
 const OPENAI_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
@@ -7,6 +10,12 @@ const OPENAI_SIZE = process.env.OPENAI_IMAGE_SIZE || "1536x1024"; // 가로형 (
 const OPENAI_QUALITY = process.env.OPENAI_IMAGE_QUALITY || "medium"; // low | medium | high
 // 한글 텍스트 품질이 좋은 상위 이미지 모델(Nano Banana Pro). 비용↑이나 결과물 차원이 다름.
 const GEMINI_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-3-pro-image";
+// Pro 이미지 모델 혼잡("high demand" 503)·시간초과 시 폴백할 GA 모델.
+// 검증(2026-07-05): Pro가 90s 행일 때도 gemini-2.5-flash-image는 8s에 이미지 반환.
+const GEMINI_FALLBACK_MODEL =
+  process.env.GEMINI_IMAGE_FALLBACK_MODEL || "gemini-2.5-flash-image";
+// 기본 모델 1회 시도 제한(ms). 초과하면 폴백으로 — Pro가 붐빌 때 오래 매달리지 않게.
+const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_IMAGE_TIMEOUT_MS) || 30000;
 // Replicate 모델: flux(기본), ideogram(텍스트 특화). env로 교체 가능.
 const FLUX_MODEL = process.env.REPLICATE_MODEL || "black-forest-labs/flux-1.1-pro";
 const IDEOGRAM_MODEL =
@@ -80,20 +89,39 @@ async function generateOpenAI(apiKey: string, prompt: string) {
 }
 
 // ── Google Gemini ──────────────────────────────────────────────────
-async function generateGemini(apiKey: string, prompt: string) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
-    }),
-  });
+// transient=true 인 에러는 상위에서 폴백 모델 재시도 신호로 쓴다(혼잡·시간초과·일시장애).
+async function generateGemini(apiKey: string, prompt: string, model: string) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), GEMINI_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
+      }),
+      signal: ctrl.signal,
+    });
+  } catch {
+    // abort(시간초과) 또는 네트워크 오류 → 폴백 대상
+    return {
+      error: `Gemini(${model}) 응답이 ${Math.round(GEMINI_TIMEOUT_MS / 1000)}초 내 오지 않았습니다.`,
+      status: 504,
+      transient: true,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+
   const data = await res.json();
   if (!res.ok) {
     const msg = data?.error?.message || `Gemini API 오류 (${res.status})`;
-    return { error: msg, status: res.status };
+    // 혼잡·게이트웨이·일시장애는 폴백으로 넘긴다
+    const transient = [429, 500, 502, 503, 504].includes(res.status);
+    return { error: msg, status: res.status, transient };
   }
   const parts = data?.candidates?.[0]?.content?.parts ?? [];
   let image = "";
@@ -112,6 +140,7 @@ async function generateGemini(apiKey: string, prompt: string) {
       error:
         "Gemini가 이미지를 반환하지 않았습니다. 모델 ID(GEMINI_IMAGE_MODEL)를 확인하세요.",
       status: 502,
+      transient: true,
       note,
     };
   return { image, note };
@@ -201,7 +230,30 @@ export async function POST(request: Request) {
     let result;
     if (provider === "gemini") {
       if (!geminiKey) return keyMissing("GEMINI_API_KEY");
-      result = await generateGemini(geminiKey, prompt);
+      result = await generateGemini(geminiKey, prompt, GEMINI_MODEL);
+      // 기본(Pro) 모델이 혼잡/시간초과면 더 여유 있는 GA 모델로 폴백
+      if (
+        "error" in result &&
+        result.transient &&
+        GEMINI_FALLBACK_MODEL &&
+        GEMINI_FALLBACK_MODEL !== GEMINI_MODEL
+      ) {
+        const fb = await generateGemini(geminiKey, prompt, GEMINI_FALLBACK_MODEL);
+        if (!("error" in fb)) {
+          const fbNote = "note" in fb && fb.note ? fb.note : "";
+          result = {
+            image: fb.image,
+            note: [
+              fbNote,
+              `기본 이미지 모델이 혼잡하여 대체 모델(${GEMINI_FALLBACK_MODEL})로 생성했습니다.`,
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          };
+        } else {
+          result = fb; // 폴백도 실패 → 폴백 에러를 반환
+        }
+      }
     } else if (provider === "openai") {
       if (!openaiKey) return keyMissing("OPENAI_API_KEY");
       result = await generateOpenAI(openaiKey, prompt);
