@@ -885,10 +885,23 @@ export default function Home() {
       form.append("file", file);
 
       const pdfRes = await fetch("/api/pdf", { method: "POST", body: form });
-      const pdfData = await pdfRes.json();
       if (!pdfRes.ok) {
-        throw new Error(pdfData.error ?? "PDF를 분석하지 못했습니다.");
+        // 플랫폼(Vercel)이 함수 도달 전에 막으면 JSON이 아닌 평문(413 "Request Entity
+        // Too Large")을 준다 → .json() 파싱이 터지지 않게 상태코드로 먼저 분기.
+        let msg = "PDF를 분석하지 못했습니다.";
+        if (pdfRes.status === 413) {
+          msg =
+            "PDF 용량이 업로드 한도(약 4.5MB)를 초과했습니다. 같은 논문을 PubMed ID·DOI·PMCID로 검색하면 전문·그림을 받아올 수 있어요.";
+        } else {
+          try {
+            msg = (await pdfRes.json()).error ?? msg;
+          } catch {
+            // 평문 응답 등 JSON 아님 — 기본 메시지 유지
+          }
+        }
+        throw new Error(msg);
       }
+      const pdfData = await pdfRes.json();
       // 업로드한 PDF를 좌측 원본에 그대로 띄우기 위해 object URL 생성
       const pdfUrl = URL.createObjectURL(file);
       await summarizeAndLoad(pdfData.paper as PubMedPaper, pdfUrl);
@@ -899,12 +912,22 @@ export default function Home() {
     }
   }
 
+  // Vercel 서버리스 함수 요청 본문 한도(4.5MB) 아래로 여유를 둔 업로드 상한
+  const MAX_PDF_UPLOAD_BYTES = 4.3 * 1024 * 1024;
+
   function acceptPdfFile(file: File | undefined | null) {
     if (!file) return;
     const isPdf =
       file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
     if (!isPdf) {
       setPaperError("PDF 파일만 업로드할 수 있습니다.");
+      return;
+    }
+    if (file.size > MAX_PDF_UPLOAD_BYTES) {
+      const mb = (file.size / (1024 * 1024)).toFixed(1);
+      setPaperError(
+        `PDF가 너무 큽니다 (${mb}MB). 업로드 한도(약 4.5MB)를 초과해요. 같은 논문을 PubMed ID·DOI·PMCID로 검색하면 전문·그림을 받아올 수 있습니다.`,
+      );
       return;
     }
     handlePdfUpload(file);
