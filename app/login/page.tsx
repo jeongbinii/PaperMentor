@@ -15,7 +15,12 @@ export default function LoginPage() {
       const supabase = createClient();
       const { error } = await supabase.auth.signInWithOAuth({
         provider,
-        options: { redirectTo: `${window.location.origin}/auth/callback` },
+        options: {
+          redirectTo: `${window.location.origin}/auth/callback`,
+          // 카카오는 앱에 '설정된 동의항목'만 요청해야 함(KOE205 방지).
+          // 이메일은 카카오 비즈앱 검수가 필요해 제외하고 닉네임만 요청.
+          ...(provider === "kakao" ? { scopes: "profile_nickname" } : {}),
+        },
       });
       // 성공하면 해당 제공자로 리다이렉트됨 → 아래 코드는 실패 시에만 도달
       if (error) {

@@ -228,8 +228,20 @@ export async function currentUserInfo(): Promise<{ id: string; name: string } | 
   const { data } = await supabase.auth.getUser();
   const u = data.user;
   if (!u) return null;
-  const meta = (u.user_metadata ?? {}) as { full_name?: string; name?: string };
+  // 제공자마다 이름 필드가 달라 넓게 대응(구글: full_name/name, 카카오: nickname/name 등)
+  const meta = (u.user_metadata ?? {}) as {
+    full_name?: string;
+    name?: string;
+    nickname?: string;
+    user_name?: string;
+    preferred_username?: string;
+  };
   const name =
-    meta.full_name || meta.name || (u.email ? u.email.split("@")[0] : "사용자");
+    meta.full_name ||
+    meta.name ||
+    meta.nickname ||
+    meta.user_name ||
+    meta.preferred_username ||
+    (u.email ? u.email.split("@")[0] : "사용자");
   return { id: u.id, name };
 }
