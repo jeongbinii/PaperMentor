@@ -308,45 +308,160 @@ async function fetchPmcImageUrls(pmcId: string): Promise<Map<string, string>> {
   return map;
 }
 
-// PMC(오픈액세스) 전문을 확보:
+// ── HTML 폴백 헬퍼 (efetch가 전문 XML을 거부하는 논문용) ─────────────
+
+// HTML 엔티티 디코드. XML용(decodeXmlText)은 숫자 엔티티를 공백으로 버리지만,
+// 표시 품질을 위해 여기선 그리스문자·기호를 실제 문자로 복원한다.
+function decodeHtmlEntities(s: string): string {
+  const named: Record<string, string> = {
+    amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
+    mdash: "—", ndash: "–", rsquo: "’", lsquo: "‘", rdquo: "”", ldquo: "“",
+    hellip: "…", deg: "°", times: "×", minus: "−", plusmn: "±", micro: "µ",
+    alpha: "α", beta: "β", gamma: "γ", delta: "δ", kappa: "κ", lambda: "λ", mu: "µ",
+  };
+  const cp = (n: number) => {
+    try {
+      return String.fromCodePoint(n);
+    } catch {
+      return " ";
+    }
+  };
+  return s
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => cp(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => cp(parseInt(d, 10)))
+    .replace(/&([a-z][a-z0-9]*);/gi, (m, n) => named[n] ?? named[n.toLowerCase()] ?? m);
+}
+
+// HTML 조각 → 평문. 헤딩·문단은 개행으로, 표·스크립트는 제거. @@FIG:n@@ 마커는 보존.
+function htmlFragmentToText(frag: string): string {
+  const s = frag
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, "")
+    .replace(/<table[\s\S]*?<\/table>/gi, "")
+    .replace(/<h[1-6][^>]*>/gi, "\n\n")
+    .replace(/<\/h[1-6]>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<li[^>]*>/gi, "• ")
+    .replace(/<\/(section|div|li|tr|ul|ol)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ");
+  return decodeHtmlEntities(s)
+    .replace(/[ \t]+/g, " ")
+    .replace(/[ \t]*\n[ \t]*/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// PMC 웹 HTML에서 본문·그림을 파싱. 화면용 HTML이라 본문 컨테이너를 격리하고
+// 참고문헌·그림 블록을 분리하는 휴리스틱이 필요하다. 본문 확신 못 하면 빈 값(→초록 폴백).
+async function buildPmcContentFromHtml(pmcId: string): Promise<PmcContent> {
+  const res = await fetch(`https://pmc.ncbi.nlm.nih.gov/articles/PMC${pmcId}/`, {
+    headers: { "User-Agent": "Mozilla/5.0 (PaperMentor)" },
+    cache: "no-store",
+  });
+  if (!res.ok) return EMPTY_CONTENT;
+  const html = await res.text();
+
+  // 1) 본문 컨테이너 격리: <section class="... main-article-body ...">
+  const startRe = /<section[^>]*class="[^"]*\bmain-article-body\b[^"]*"[^>]*>/i;
+  const startM = startRe.exec(html);
+  if (!startM) return EMPTY_CONTENT;
+  const afterStart = html.slice(startM.index + startM[0].length);
+
+  // 참고문헌(<section id="ref-list…">) 앞까지가 본문. 그 뒤(감사말·각주 등)는 버림.
+  const refM = /<section[^>]*\bid="ref-list/i.exec(afterStart);
+  let region = refM ? afterStart.slice(0, refM.index) : afterStart;
+
+  // 2) 초록은 별도로 이미 확보 → 첫 본문 섹션 제목(pmc_sec_title)부터 시작해 중복 방지
+  const firstSec = /<h2[^>]*class="[^"]*pmc_sec_title/i.exec(region);
+  if (firstSec) region = region.slice(firstSec.index);
+
+  // 3) <figure> 블록 → figures 추출 + 위치에 @@FIG:n@@ 마커 치환(인라인 배치 보존)
+  const figures: Figure[] = [];
+  region = region.replace(/<figure\b[\s\S]*?<\/figure>/gi, (block) => {
+    const objHead = decodeHtmlEntities(
+      (block.match(/<h4[^>]*class="[^"]*obj_head[^"]*"[^>]*>([\s\S]*?)<\/h4>/i)?.[1] ?? "")
+        .replace(/<[^>]+>/g, " "),
+    ).replace(/\s+/g, " ").trim();
+    const figcap = decodeHtmlEntities(
+      (block.match(/<figcaption[^>]*>([\s\S]*?)<\/figcaption>/i)?.[1] ?? "")
+        .replace(/<[^>]+>/g, " "),
+    ).replace(/\s+/g, " ").trim();
+    const srcs = Array.from(
+      block.matchAll(
+        /<img[^>]*\bsrc="(https:\/\/cdn\.ncbi\.nlm\.nih\.gov\/pmc\/blobs\/[^"]+)"/gi,
+      ),
+    ).map((m) => m[1]);
+    // 이미지가 없는 figure(수식 등)는 슬라이드/표시에서 의미 없어 건너뜀
+    if (srcs.length === 0) return " ";
+    const idx = figures.length;
+    const labelM = objHead.match(/^\s*((?:Figure|Fig\.?|Table|Scheme)\s*\.?\s*\d+)/i);
+    const label = labelM ? labelM[1].replace(/\s+/g, " ").trim() : `Figure ${idx + 1}`;
+    const title = objHead.replace(
+      /^\s*(?:Figure|Fig\.?|Table|Scheme)\s*\.?\s*\d+\s*[.:]?\s*/i,
+      "",
+    );
+    const caption = [title, figcap].map((t) => t.trim()).filter(Boolean).join(" ");
+    figures.push({ label, caption, srcs });
+    return `\n\n@@FIG:${idx}@@\n\n`;
+  });
+
+  const bodyText = htmlFragmentToText(region);
+  if (bodyText.length < 500) return EMPTY_CONTENT; // 본문 격리 실패로 간주 → 초록 폴백
+
+  // 분석 입력용 발췌는 마커 제거한 순수 본문에서 추출
+  const plain = bodyText.replace(/@@FIG:\d+@@/g, " ").replace(/\s+/g, " ").trim();
+  const fullText = await extractMethodsResults(plain);
+  return { bodyText, figures, fullText };
+}
+
+// ── PMC 전문 확보 (XML 우선 → HTML 폴백) ────────────────────────────
+type PmcContent = { bodyText: string; figures: Figure[]; fullText: string };
+const EMPTY_CONTENT: PmcContent = { bodyText: "", figures: [], fullText: "" };
+
+// efetch(db=pmc) 전문 XML(JATS). 오픈액세스 서브셋이면 구조가 깔끔. 본문 없으면 빈 값.
+async function buildPmcContentFromXml(pmcId: string): Promise<PmcContent> {
+  const res = await ncbiFetch(`${EUTILS}/efetch.fcgi?db=pmc&id=${pmcId}&retmode=xml`);
+  if (!res.ok) return EMPTY_CONTENT;
+  const xml = await res.text();
+
+  const plain = jatsBodyToText(xml);
+  if (plain.length < 500) return EMPTY_CONTENT; // 전문 미수록/출판사 XML 거부
+
+  const figMeta = parseFigures(xml);
+  const bodyText = jatsBodyToFullText(xml, figMeta);
+  const imgMap = figMeta.some((f) => f.files.length)
+    ? await fetchPmcImageUrls(pmcId)
+    : new Map<string, string>();
+  const figures: Figure[] = figMeta.map((f) => ({
+    label: f.label,
+    caption: f.caption,
+    srcs: f.files.map((file) => imgMap.get(file)).filter((u): u is string => !!u),
+  }));
+
+  const fullText = await extractMethodsResults(plain);
+  return { bodyText, figures, fullText };
+}
+
+// PMC 전문 확보:
 //  - bodyText: 표시용 전체 본문(@@FIG:n@@ 그림 마커 포함)
 //  - figures : 그림(라벨·캡션·CDN 이미지 URL)
-//  - fullText: 분석 입력용 methods/results 발췌(전체 본문은 토큰이 커서 발췌만 분석에 사용)
+//  - fullText: 분석 입력용 methods/results 발췌
+// 먼저 efetch XML(구조 깔끔)을 쓰고, 출판사가 XML을 막은 논문은 웹 HTML로 폴백한다.
 // knownPmcId를 주면 PMID→PMC 조회를 생략한다. 전문이 없거나 실패하면 모두 빈 값.
 async function buildPmcContent(
   pmid: string,
   knownPmcId?: string,
-): Promise<{ bodyText: string; figures: Figure[]; fullText: string }> {
-  const empty = { bodyText: "", figures: [] as Figure[], fullText: "" };
+): Promise<PmcContent> {
   try {
     const pmcId = knownPmcId || (await fetchPmcId(pmid));
-    if (!pmcId) return empty;
-    const res = await ncbiFetch(
-      `${EUTILS}/efetch.fcgi?db=pmc&id=${pmcId}&retmode=xml`,
-    );
-    if (!res.ok) return empty;
-    const xml = await res.text();
+    if (!pmcId) return EMPTY_CONTENT;
 
-    const plain = jatsBodyToText(xml);
-    if (plain.length < 500) return empty; // 전문 미수록/비어있음
+    const fromXml = await buildPmcContentFromXml(pmcId);
+    if (fromXml.bodyText) return fromXml;
 
-    const figMeta = parseFigures(xml);
-    const bodyText = jatsBodyToFullText(xml, figMeta);
-    const imgMap = figMeta.some((f) => f.files.length)
-      ? await fetchPmcImageUrls(pmcId)
-      : new Map<string, string>();
-    const figures: Figure[] = figMeta.map((f) => ({
-      label: f.label,
-      caption: f.caption,
-      srcs: f.files
-        .map((file) => imgMap.get(file))
-        .filter((u): u is string => !!u),
-    }));
-
-    const fullText = await extractMethodsResults(plain);
-    return { bodyText, figures, fullText };
+    // efetch가 전문 XML을 거부하는 논문(웹엔 보이지만 OA 서브셋 밖) → 웹 HTML 파싱
+    return await buildPmcContentFromHtml(pmcId);
   } catch {
-    return empty;
+    return EMPTY_CONTENT;
   }
 }
 

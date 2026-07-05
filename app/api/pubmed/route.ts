@@ -4,6 +4,9 @@ import { resolveToPmid, loadPaperByPmid } from "@/app/lib/ncbi";
 // 기존 import 경로 유지용 재-export (slides/route·slidePlan 등이 여기서 타입을 가져온다)
 export type { Figure, PubMedPaper } from "@/app/lib/ncbi";
 
+export const runtime = "nodejs";
+export const maxDuration = 60; // PMC XML/HTML fetch + 발췌 LLM 호출 여유
+
 // PMID · DOI · PMCID 어느 것으로 들어와도 동일한 PubMedPaper를 반환.
 export async function POST(request: Request) {
   try {
