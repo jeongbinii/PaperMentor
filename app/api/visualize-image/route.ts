@@ -10,9 +10,13 @@ const OPENAI_SIZE = process.env.OPENAI_IMAGE_SIZE || "1536x1024"; // 가로형 (
 const OPENAI_QUALITY = process.env.OPENAI_IMAGE_QUALITY || "medium"; // low | medium | high
 // 한글 텍스트 품질이 좋은 상위 이미지 모델(Nano Banana Pro). 비용↑이나 결과물 차원이 다름.
 const GEMINI_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-3-pro-image";
-// 기본 모델 1회 시도 제한(ms). 초과하면 GPT 폴백으로 — Pro가 붐빌 때 오래 매달리지 않게.
-// (gemini-2.5-flash-image는 품질이 낮아 폴백에서 제외 — Pro 혼잡 시 GPT로만 폴백)
+// 기본 모델 1회 시도 제한(ms). 초과하면 행 대신 에러 반환 — Pro가 붐빌 때 오래 매달리지 않게.
 const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_IMAGE_TIMEOUT_MS) || 30000;
+
+// UI에서 선택 가능한 이미지 모델/품질 화이트리스트(임의 값 차단). 목록 밖이면 기본값 사용.
+const GEMINI_MODELS = ["gemini-3-pro-image", "gemini-2.5-flash-image"];
+const OPENAI_MODELS = ["gpt-image-1"];
+const OPENAI_QUALITIES = ["low", "medium", "high", "auto"];
 // Replicate 모델: flux(기본), ideogram(텍스트 특화). env로 교체 가능.
 const FLUX_MODEL = process.env.REPLICATE_MODEL || "black-forest-labs/flux-1.1-pro";
 const IDEOGRAM_MODEL =
@@ -77,7 +81,12 @@ Create a single graphical-abstract style summary image that captures the content
 }
 
 // ── OpenAI gpt-image-1 ─────────────────────────────────────────────
-async function generateOpenAI(apiKey: string, prompt: string) {
+async function generateOpenAI(
+  apiKey: string,
+  prompt: string,
+  model: string,
+  quality: string,
+) {
   const res = await fetch("https://api.openai.com/v1/images/generations", {
     method: "POST",
     headers: {
@@ -85,10 +94,10 @@ async function generateOpenAI(apiKey: string, prompt: string) {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: OPENAI_MODEL,
+      model,
       prompt,
       size: OPENAI_SIZE,
-      quality: OPENAI_QUALITY,
+      quality,
       n: 1,
     }),
   });
@@ -237,6 +246,10 @@ export async function POST(request: Request) {
     // 한글 렌더링이 우수한 Gemini만 한글 라벨, 나머지(GPT 등)는 영어 라벨로 우회.
     const prompt = buildPrompt(body, provider === "gemini" ? "ko" : "en");
 
+    // UI에서 지정한 모델/품질(화이트리스트 검증, 없으면 기본값).
+    const reqModel = typeof body.model === "string" ? body.model : "";
+    const reqQuality = typeof body.quality === "string" ? body.quality : "";
+
     const keyMissing = (label: string) =>
       NextResponse.json(
         { error: `${label} 키가 .env.local에 없습니다. 추가 후 서버를 재시작하세요.` },
@@ -246,12 +259,16 @@ export async function POST(request: Request) {
     let result;
     if (provider === "gemini") {
       if (!geminiKey) return keyMissing("GEMINI_API_KEY");
-      // Gemini는 무조건 3.0 Pro(gemini-3-pro-image)만 사용 — 자동 폴백 없음.
-      // Pro가 혼잡하면 에러를 그대로 반환하고, 필요하면 사용자가 상단 토글로 GPT를 직접 선택.
-      result = await generateGemini(geminiKey, prompt, GEMINI_MODEL);
+      // 자동 폴백 없음 — 사용자가 고른(또는 기본 3.0 Pro) Gemini 모델만 사용.
+      const model = GEMINI_MODELS.includes(reqModel) ? reqModel : GEMINI_MODEL;
+      result = await generateGemini(geminiKey, prompt, model);
     } else if (provider === "openai") {
       if (!openaiKey) return keyMissing("OPENAI_API_KEY");
-      result = await generateOpenAI(openaiKey, prompt);
+      const model = OPENAI_MODELS.includes(reqModel) ? reqModel : OPENAI_MODEL;
+      const quality = OPENAI_QUALITIES.includes(reqQuality)
+        ? reqQuality
+        : OPENAI_QUALITY;
+      result = await generateOpenAI(openaiKey, prompt, model, quality);
     } else if (provider === "flux") {
       if (!replicateKey) return keyMissing("REPLICATE_API_TOKEN");
       result = await generateReplicate(replicateKey, prompt, FLUX_MODEL);

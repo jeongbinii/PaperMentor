@@ -36,6 +36,15 @@ const FONT_DEFAULT = 16;
 // (시각화 탭은 중앙으로 이동, 신뢰도 탭은 일시 비활성화 — 렌더 블록은 보존)
 const SHOW_RIGHT_PANEL = true;
 
+// 시각화 요약 이미지에서 선택 가능한 모델/품질. value = "provider|model|quality".
+// Gemini는 한글 라벨, GPT(gpt-image-1)는 영어 라벨(한글 렌더 깨짐). GPT는 품질 등급으로 버전 조절.
+const IMAGE_MODEL_OPTIONS: { v: string; label: string }[] = [
+  { v: "gemini|gemini-3-pro-image|", label: "Gemini 3 Pro · 한글 (추천)" },
+  { v: "gemini|gemini-2.5-flash-image|", label: "Gemini 2.5 Flash · 한글·빠름" },
+  { v: "openai|gpt-image-1|high", label: "GPT Image · 고품질 (영어)" },
+  { v: "openai|gpt-image-1|medium", label: "GPT Image · 표준 (영어)" },
+];
+
 type ChatMessage = {
   role: "user" | "assistant";
   text: string;
@@ -744,6 +753,9 @@ export default function Home() {
   const [imageProvider, setImageProvider] = useState<
     "gemini" | "openai" | "flux" | "ideogram"
   >("gemini");
+  // 선택된 이미지 모델/품질(드롭다운). provider와 함께 백엔드로 전달.
+  const [imageModel, setImageModel] = useState<string>("gemini-3-pro-image");
+  const [imageQuality, setImageQuality] = useState<string>("");
 
   // 발표 슬라이드(.pptx) 다운로드 상태
   const [slidesMode, setSlidesMode] = useState<null | "compose" | "llm">(null);
@@ -1203,6 +1215,9 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           provider: providerOverride ?? imageProvider,
+          // providerOverride(자동생성 등)는 기본 모델 사용 → model/quality 빈 값
+          model: providerOverride ? "" : imageModel,
+          quality: providerOverride ? "" : imageQuality,
           title: target.paper.title,
           keyFindings: target.summary.keyFindings,
           methods: target.summary.methods,
@@ -2042,33 +2057,26 @@ export default function Home() {
                     시각화 요약 (Graphical Abstract)
                   </h3>
                   <div className="flex items-center gap-2">
-                    {/* 이미지 모델 선택: Gemini(한글 강함) / GPT(대안) */}
-                    <div className="flex items-center gap-1">
-                      {(
-                        [
-                          ["gemini", "Gemini"],
-                          ["openai", "GPT"],
-                        ] as const
-                      ).map(([key, label]) => (
-                        <button
-                          key={key}
-                          onClick={() => setImageProvider(key)}
-                          disabled={geminiLoading}
-                          title={
-                            key === "gemini"
-                              ? "Google Gemini — 한글 라벨 품질이 가장 좋음"
-                              : "OpenAI GPT (gpt-image-1) — Gemini 혼잡 시 대안"
-                          }
-                          className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-50 ${
-                            imageProvider === key
-                              ? "bg-blue-600 text-white"
-                              : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
-                          }`}
-                        >
-                          {label}
-                        </button>
+                    {/* 이미지 모델·품질 선택 (Gemini=한글, GPT=영어 라벨) */}
+                    <select
+                      value={`${imageProvider}|${imageModel}|${imageQuality}`}
+                      onChange={(e) => {
+                        const [p, m, q] = e.target.value.split("|");
+                        setImageProvider(
+                          p as "gemini" | "openai" | "flux" | "ideogram",
+                        );
+                        setImageModel(m);
+                        setImageQuality(q);
+                      }}
+                      disabled={geminiLoading}
+                      className="rounded-md border border-zinc-200 bg-white px-2 py-1 text-[11px] text-zinc-700 disabled:opacity-50"
+                    >
+                      {IMAGE_MODEL_OPTIONS.map((o) => (
+                        <option key={o.v} value={o.v}>
+                          {o.label}
+                        </option>
                       ))}
-                    </div>
+                    </select>
                     {(loadedPaper.geminiImage || geminiError) && !geminiLoading && (
                       <button
                         onClick={() => handleGenerateImage(loadedPaper)}
