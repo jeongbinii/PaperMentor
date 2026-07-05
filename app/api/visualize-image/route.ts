@@ -10,11 +10,8 @@ const OPENAI_SIZE = process.env.OPENAI_IMAGE_SIZE || "1536x1024"; // 가로형 (
 const OPENAI_QUALITY = process.env.OPENAI_IMAGE_QUALITY || "medium"; // low | medium | high
 // 한글 텍스트 품질이 좋은 상위 이미지 모델(Nano Banana Pro). 비용↑이나 결과물 차원이 다름.
 const GEMINI_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-3-pro-image";
-// Pro 이미지 모델 혼잡("high demand" 503)·시간초과 시 폴백할 GA 모델.
-// 검증(2026-07-05): Pro가 90s 행일 때도 gemini-2.5-flash-image는 8s에 이미지 반환.
-const GEMINI_FALLBACK_MODEL =
-  process.env.GEMINI_IMAGE_FALLBACK_MODEL || "gemini-2.5-flash-image";
-// 기본 모델 1회 시도 제한(ms). 초과하면 폴백으로 — Pro가 붐빌 때 오래 매달리지 않게.
+// 기본 모델 1회 시도 제한(ms). 초과하면 GPT 폴백으로 — Pro가 붐빌 때 오래 매달리지 않게.
+// (gemini-2.5-flash-image는 품질이 낮아 폴백에서 제외 — Pro 혼잡 시 GPT로만 폴백)
 const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_IMAGE_TIMEOUT_MS) || 30000;
 // Replicate 모델: flux(기본), ideogram(텍스트 특화). env로 교체 가능.
 const FLUX_MODEL = process.env.REPLICATE_MODEL || "black-forest-labs/flux-1.1-pro";
@@ -231,28 +228,17 @@ export async function POST(request: Request) {
     if (provider === "gemini") {
       if (!geminiKey) return keyMissing("GEMINI_API_KEY");
       result = await generateGemini(geminiKey, prompt, GEMINI_MODEL);
-      // 기본(Pro) 모델이 혼잡/시간초과면 더 여유 있는 GA 모델로 폴백
-      if (
-        "error" in result &&
-        result.transient &&
-        GEMINI_FALLBACK_MODEL &&
-        GEMINI_FALLBACK_MODEL !== GEMINI_MODEL
-      ) {
-        const fb = await generateGemini(geminiKey, prompt, GEMINI_FALLBACK_MODEL);
-        if (!("error" in fb)) {
-          const fbNote = "note" in fb && fb.note ? fb.note : "";
+      // Pro 모델 혼잡/시간초과 시 GPT(gpt-image-1)로 폴백 — OpenAI 키 있을 때만.
+      // gemini-2.5-flash-image는 품질이 낮아 폴백에서 제외.
+      if ("error" in result && result.transient && openaiKey) {
+        const gpt = await generateOpenAI(openaiKey, prompt);
+        if (!("error" in gpt)) {
           result = {
-            image: fb.image,
-            note: [
-              fbNote,
-              `기본 이미지 모델이 혼잡하여 대체 모델(${GEMINI_FALLBACK_MODEL})로 생성했습니다.`,
-            ]
-              .filter(Boolean)
-              .join("\n"),
+            image: gpt.image,
+            note: "Gemini 3 Pro가 혼잡하여 GPT(gpt-image-1)로 생성했습니다.",
           };
-        } else {
-          result = fb; // 폴백도 실패 → 폴백 에러를 반환
         }
+        // GPT도 실패하면 원래 Gemini 혼잡 에러를 그대로 유지(OpenAI 결제오류로 덮지 않음).
       }
     } else if (provider === "openai") {
       if (!openaiKey) return keyMissing("OPENAI_API_KEY");
