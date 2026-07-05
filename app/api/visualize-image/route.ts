@@ -227,19 +227,9 @@ export async function POST(request: Request) {
     let result;
     if (provider === "gemini") {
       if (!geminiKey) return keyMissing("GEMINI_API_KEY");
+      // Gemini는 무조건 3.0 Pro(gemini-3-pro-image)만 사용 — 자동 폴백 없음.
+      // Pro가 혼잡하면 에러를 그대로 반환하고, 필요하면 사용자가 상단 토글로 GPT를 직접 선택.
       result = await generateGemini(geminiKey, prompt, GEMINI_MODEL);
-      // Pro 모델 혼잡/시간초과 시 GPT(gpt-image-1)로 폴백 — OpenAI 키 있을 때만.
-      // gemini-2.5-flash-image는 품질이 낮아 폴백에서 제외.
-      if ("error" in result && result.transient && openaiKey) {
-        const gpt = await generateOpenAI(openaiKey, prompt);
-        if (!("error" in gpt)) {
-          result = {
-            image: gpt.image,
-            note: "Gemini 3 Pro가 혼잡하여 GPT(gpt-image-1)로 생성했습니다.",
-          };
-        }
-        // GPT도 실패하면 원래 Gemini 혼잡 에러를 그대로 유지(OpenAI 결제오류로 덮지 않음).
-      }
     } else if (provider === "openai") {
       if (!openaiKey) return keyMissing("OPENAI_API_KEY");
       result = await generateOpenAI(openaiKey, prompt);
