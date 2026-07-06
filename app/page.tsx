@@ -2140,9 +2140,8 @@ export default function Home() {
           )}
           {paperLoading ? (
             <div className="flex flex-col items-center justify-center h-full text-zinc-400 gap-2">
-              <div className="animate-pulse text-sm">
-                논문을 불러오고 Claude로 요약 중입니다...
-              </div>
+              <Spinner />
+              <div className="animate-pulse text-sm">논문을 불러오는 중입니다…</div>
             </div>
           ) : loadedPaper ? (
             <div className="space-y-6">
