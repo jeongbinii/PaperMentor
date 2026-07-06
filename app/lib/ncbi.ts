@@ -30,16 +30,75 @@ function ncbiParams(): string {
   return parts.join("&");
 }
 
-// 레이트리밋(429)에 지수 백오프 재시도. NCBI는 키 없이 초당 3회 제한이라
-// 논문 1건 로드에 필요한 여러 호출이 몰리면 간헐적으로 429가 난다.
-async function ncbiFetch(url: string, tries = 4): Promise<Response> {
-  const full = url + (url.includes("?") ? "&" : "?") + ncbiParams();
-  let res: Response = await fetch(full, { cache: "no-store" });
-  for (let i = 0; i < tries - 1 && res.status === 429; i++) {
-    await new Promise((r) => setTimeout(r, 350 * 2 ** i)); // 350·700·1400ms
-    res = await fetch(full, { cache: "no-store" });
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+type FetchResult = { ok: boolean; status: number; text: string; data?: unknown };
+
+// eutils JSON 응답 부분 타입 (사용하는 필드만).
+type LinkSetDb = { dbto?: string; linkname?: string; links?: Array<string | number> };
+type LinkSets = { linksets?: Array<{ linksetdbs?: LinkSetDb[] }> };
+type EsummaryEntry = {
+  error?: string;
+  title?: string;
+  fulljournalname?: string;
+  source?: string;
+  pubdate?: string;
+  authors?: Array<{ authtype?: string; name: string }>;
+  articleids?: Array<{ idtype: string; value: string }>;
+};
+
+// 네트워크 오류·타임아웃·429·본문 중간 끊김·잘린 JSON 모두에 지수 백오프 재시도.
+// 핵심: fetch()는 헤더가 오면 즉시 resolve되고 본문은 그 뒤에 스트리밍된다. NCBI는 (키가 있어도)
+// 헤더는 200으로 보내놓고 본문 전송 도중 TCP 연결을 끊는 일이 잦다 → .text()/.json()에서
+// UND_ERR_SOCKET("other side closed") 또는 잘린/빈 응답의 SyntaxError가 난다. 이 소비 단계를
+// try 밖에 두면 재시도가 무의미하다. 따라서 본문 읽기와 JSON 파싱까지 한 시도로 묶어 재시도한다.
+// 한 번의 끊김에 PMC 전문·그림이 통째로 누락돼 "같은 논문인데 어쩔 땐 초록만" 되던 증상의 근본 수정.
+async function robustFetch(
+  url: string,
+  init: RequestInit = {},
+  opts: { tries?: number; timeoutMs?: number; json?: boolean } = {},
+): Promise<FetchResult> {
+  const { tries = 4, timeoutMs = 20000, json = false } = opts;
+  let lastErr: unknown;
+  for (let i = 0; i < tries; i++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...init, signal: ctrl.signal, cache: "no-store" });
+      if (res.status === 429 && i < tries - 1) {
+        clearTimeout(timer);
+        await sleep(350 * 2 ** i); // 350·700·1400ms
+        continue;
+      }
+      const text = await res.text(); // 본문 소비까지 try 안 → 중간 끊김도 재시도
+      clearTimeout(timer);
+      // JSON을 기대하는데 성공 응답 본문이 파싱 실패하면(잘림·빈 응답) 재시도 대상.
+      const data = json && res.ok ? JSON.parse(text) : undefined;
+      return { ok: res.ok, status: res.status, text, data };
+    } catch (e) {
+      clearTimeout(timer);
+      lastErr = e; // 소켓 끊김·타임아웃(AbortError)·JSON 파싱 실패 — 모두 재시도
+      if (i < tries - 1) await sleep(350 * 2 ** i);
+    }
   }
-  return res;
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error("네트워크 요청이 재시도 후에도 실패했습니다.");
+}
+
+// eutils URL에 식별 파라미터(+선택 API 키)를 덧붙인다.
+function euUrl(url: string): string {
+  return url + (url.includes("?") ? "&" : "?") + ncbiParams();
+}
+
+// eutils JSON GET: 본문·파싱까지 재시도. 실패(4xx/5xx)면 ok=false, data 없음.
+function ncbiJson(url: string, tries = 4): Promise<FetchResult> {
+  return robustFetch(euUrl(url), {}, { tries, json: true });
+}
+
+// eutils 텍스트 GET(efetch XML 등): 본문까지 재시도.
+function ncbiText(url: string, tries = 4): Promise<FetchResult> {
+  return robustFetch(euUrl(url), {}, { tries });
 }
 
 // ── 식별자 판별·정규화 ──────────────────────────────────────────────
@@ -64,10 +123,10 @@ async function doiToPmid(doi: string): Promise<string | null> {
   const url = `${EUTILS}/esearch.fcgi?db=pubmed&term=${encodeURIComponent(
     doi,
   )}[doi]&retmode=json`;
-  const res = await ncbiFetch(url);
+  const res = await ncbiJson(url);
   if (!res.ok) return null;
-  const data = await res.json();
-  const ids: string[] | undefined = data?.esearchresult?.idlist;
+  const data = res.data as { esearchresult?: { idlist?: string[] } } | undefined;
+  const ids = data?.esearchresult?.idlist;
   return ids && ids.length > 0 ? ids[0] : null;
 }
 
@@ -75,13 +134,11 @@ async function doiToPmid(doi: string): Promise<string | null> {
 async function pmcidToPmid(pmcNumeric: string): Promise<string | null> {
   if (!pmcNumeric) return null;
   const url = `${EUTILS}/elink.fcgi?dbfrom=pmc&db=pubmed&id=${pmcNumeric}&retmode=json`;
-  const res = await ncbiFetch(url);
+  const res = await ncbiJson(url);
   if (!res.ok) return null;
-  const data = await res.json();
-  const dbs = data?.linksets?.[0]?.linksetdbs ?? [];
+  const dbs = (res.data as LinkSets | undefined)?.linksets?.[0]?.linksetdbs ?? [];
   const pm = dbs.find(
-    (d: { dbto?: string; linkname?: string }) =>
-      d.dbto === "pubmed" || d.linkname?.includes("pubmed"),
+    (d) => d.dbto === "pubmed" || d.linkname?.includes("pubmed"),
   );
   const id = pm?.links?.[0];
   return id ? String(id) : null;
@@ -89,20 +146,18 @@ async function pmcidToPmid(pmcNumeric: string): Promise<string | null> {
 
 async function fetchSummary(pmid: string) {
   const url = `${EUTILS}/esummary.fcgi?db=pubmed&id=${pmid}&retmode=json`;
-  const res = await ncbiFetch(url);
+  const res = await ncbiJson(url);
   if (!res.ok) throw new Error(`esummary 실패 (status ${res.status})`);
-  const data = await res.json();
-  const entry = data?.result?.[pmid];
+  const data = res.data as { result?: Record<string, EsummaryEntry> } | undefined;
+  const entry: EsummaryEntry | undefined = data?.result?.[pmid];
   if (!entry || entry.error) {
     throw new Error("해당 PMID의 논문을 PubMed에서 찾을 수 없습니다.");
   }
   const authors: string[] = (entry.authors ?? [])
-    .filter((a: { authtype?: string }) => a.authtype === "Author")
-    .map((a: { name: string }) => a.name);
+    .filter((a) => a.authtype === "Author")
+    .map((a) => a.name);
   const doi: string | null =
-    (entry.articleids ?? []).find(
-      (id: { idtype: string }) => id.idtype === "doi",
-    )?.value ?? null;
+    (entry.articleids ?? []).find((id) => id.idtype === "doi")?.value ?? null;
   return {
     title: entry.title ?? "",
     authors,
@@ -126,11 +181,11 @@ function stripXml(s: string): string {
 // 깔끔한 초록: efetch XML의 <AbstractText>만 추출(저자·소속·DOI 등 잡정보 제거).
 // 구조화 초록(Label="METHODS" 등)은 라벨을 살려 재구성. 없으면 text 모드로 폴백.
 async function fetchAbstract(pmid: string): Promise<string> {
-  const xmlRes = await ncbiFetch(
+  const xmlRes = await ncbiText(
     `${EUTILS}/efetch.fcgi?db=pubmed&id=${pmid}&retmode=xml`,
   );
   if (xmlRes.ok) {
-    const xml = await xmlRes.text();
+    const xml = xmlRes.text;
     const parts: string[] = [];
     const re = /<AbstractText([^>]*)>([\s\S]*?)<\/AbstractText>/gi;
     let m: RegExpExecArray | null;
@@ -143,23 +198,21 @@ async function fetchAbstract(pmid: string): Promise<string> {
     if (abstract) return abstract;
   }
   // 폴백: 구조화 초록 파싱 실패 시 text 모드
-  const res = await ncbiFetch(
+  const res = await ncbiText(
     `${EUTILS}/efetch.fcgi?db=pubmed&id=${pmid}&rettype=abstract&retmode=text`,
   );
   if (!res.ok) throw new Error(`efetch 실패 (status ${res.status})`);
-  return (await res.text()).trim();
+  return res.text.trim();
 }
 
 // PMID → PMC(오픈액세스 전문) 식별자. 없으면 null (= 전문 비공개/미수록).
 async function fetchPmcId(pmid: string): Promise<string | null> {
   const url = `${EUTILS}/elink.fcgi?dbfrom=pubmed&db=pmc&id=${pmid}&retmode=json`;
-  const res = await ncbiFetch(url);
+  const res = await ncbiJson(url);
   if (!res.ok) return null;
-  const data = await res.json();
-  const dbs = data?.linksets?.[0]?.linksetdbs ?? [];
+  const dbs = (res.data as LinkSets | undefined)?.linksets?.[0]?.linksetdbs ?? [];
   const pmc = dbs.find(
-    (d: { dbto?: string; linkname?: string }) =>
-      d.dbto === "pmc" || d.linkname?.includes("pmc"),
+    (d) => d.dbto === "pmc" || d.linkname?.includes("pmc"),
   );
   const id = pmc?.links?.[0];
   return id ? String(id) : null;
@@ -290,12 +343,13 @@ function jatsBodyToFullText(xml: string, figs: { id: string }[]): string {
 async function fetchPmcImageUrls(pmcId: string): Promise<Map<string, string>> {
   const map = new Map<string, string>();
   try {
-    const res = await fetch(`https://pmc.ncbi.nlm.nih.gov/articles/PMC${pmcId}/`, {
-      headers: { "User-Agent": "Mozilla/5.0 (PaperMentor)" },
-      cache: "no-store",
-    });
+    const res = await robustFetch(
+      `https://pmc.ncbi.nlm.nih.gov/articles/PMC${pmcId}/`,
+      { headers: { "User-Agent": "Mozilla/5.0 (PaperMentor)" } },
+      { tries: 3 },
+    );
     if (!res.ok) return map;
-    const html = await res.text();
+    const html = res.text;
     const re =
       /https:\/\/cdn\.ncbi\.nlm\.nih\.gov\/pmc\/blobs\/[^"'\s]+?\/([^"'/\s]+?)\.(?:jpg|jpeg|png|gif)/gi;
     let m: RegExpExecArray | null;
@@ -353,12 +407,13 @@ function htmlFragmentToText(frag: string): string {
 // PMC 웹 HTML에서 본문·그림을 파싱. 화면용 HTML이라 본문 컨테이너를 격리하고
 // 참고문헌·그림 블록을 분리하는 휴리스틱이 필요하다. 본문 확신 못 하면 빈 값(→초록 폴백).
 async function buildPmcContentFromHtml(pmcId: string): Promise<PmcContent> {
-  const res = await fetch(`https://pmc.ncbi.nlm.nih.gov/articles/PMC${pmcId}/`, {
-    headers: { "User-Agent": "Mozilla/5.0 (PaperMentor)" },
-    cache: "no-store",
-  });
+  const res = await robustFetch(
+    `https://pmc.ncbi.nlm.nih.gov/articles/PMC${pmcId}/`,
+    { headers: { "User-Agent": "Mozilla/5.0 (PaperMentor)" } },
+    { tries: 3 },
+  );
   if (!res.ok) return EMPTY_CONTENT;
-  const html = await res.text();
+  const html = res.text;
 
   // 1) 본문 컨테이너 격리: <section class="... main-article-body ...">
   const startRe = /<section[^>]*class="[^"]*\bmain-article-body\b[^"]*"[^>]*>/i;
@@ -419,9 +474,9 @@ const EMPTY_CONTENT: PmcContent = { bodyText: "", figures: [], fullText: "" };
 
 // efetch(db=pmc) 전문 XML(JATS). 오픈액세스 서브셋이면 구조가 깔끔. 본문 없으면 빈 값.
 async function buildPmcContentFromXml(pmcId: string): Promise<PmcContent> {
-  const res = await ncbiFetch(`${EUTILS}/efetch.fcgi?db=pmc&id=${pmcId}&retmode=xml`);
+  const res = await ncbiText(`${EUTILS}/efetch.fcgi?db=pmc&id=${pmcId}&retmode=xml`);
   if (!res.ok) return EMPTY_CONTENT;
-  const xml = await res.text();
+  const xml = res.text;
 
   const plain = jatsBodyToText(xml);
   if (plain.length < 500) return EMPTY_CONTENT; // 전문 미수록/출판사 XML 거부
