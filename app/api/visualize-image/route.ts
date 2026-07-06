@@ -75,22 +75,48 @@ function buildPrompt(
     // 원문 데이터는 한글이므로, 라벨은 영어로 번역해 그리라고 명시(한글 렌더링 깨짐 회피).
     return `${paperText}
 
-Create a single graphical-abstract style summary image that captures the content above at a glance. The source text is in Korean — translate any labels you draw into clear, correctly spelled English. Draw the image itself, not explanatory prose.
+Draw a single image that visualizes the core content above so that someone new to the field can grasp the overall structure and flow at a glance. The source text is in Korean — translate any labels into clear, correctly spelled English. Draw the image itself, not explanatory prose.
 
-[Style rules]
-- Use restrained color. Realistic coloring of organs, cells, patient groups, or devices is allowed, but do not add colorful highlights merely for emphasis; keep backgrounds, shapes, and arrows mostly white, gray, and one or two pale tones.
-- Never put a journal name ("NEJM" etc.) or watermark text such as "graphical abstract" in the image.
-- All labels and text must be in clear, correctly spelled English, kept to the necessary minimum. Do not render any Korean characters.`;
+[Layout — adapt to the paper's nature]
+- Identify the study type (intervention/treatment, mechanism/molecular, diagnostic, epidemiological, review/meta-analysis, etc.) and arrange a logic flow that fits it. Do NOT force a clinical "subjects -> intervention -> outcome" template onto every paper.
+  - intervention/treatment -> subjects -> intervention -> outcome
+  - mechanism/molecular -> causal flow of molecules/pathways (what regulates what, leading to which downstream effect)
+  - diagnostic/biomarker -> test/marker -> classification/prediction
+  - review/meta-analysis -> multiple lines of evidence -> integrated conclusion
+- The goal is the big picture of "what acts on / connects to what, and how" — structure and flow, not detail.
+
+[Must follow — prevent fabricated numbers]
+- Do NOT draw specific numbers: no effect sizes, confidence intervals, p-values, percentages, measurements, or chart axis ticks (they become invented, misleading numbers). Show increase/decrease, magnitude, direction, and causation only with arrows and relative sizes and icons.
+- Do NOT draw data charts such as bar charts, forest plots, or numeric tables. Express concepts with icons, diagrams, and flow.
+- Do not invent facts not present in the content above.
+
+[Style]
+- Restrained color; realistic coloring of organs/cells/patient groups/devices is fine, but no colorful highlights merely for emphasis. Mostly white, gray, and one or two pale tones.
+- Never put a journal name or watermark text such as "graphical abstract".
+- All labels in clear, correctly spelled English, minimal. Avoid dense small labels — keep text large and minimal.`;
   }
 
   return `${paperText}
 
-위 내용을 한눈에 들어오도록 정리한 시각화 요약 이미지를 한 장 생성해줘. 설명 텍스트 말고 이미지를 직접 그려줘.
+위 논문의 핵심 내용을, 이 분야를 처음 접하는 사람도 '전체 구조와 흐름'을 한눈에 이해할 수 있도록 시각화한 이미지 한 장을 그려줘. 설명하는 글이 아니라 그림 자체를 그려줘.
 
-[스타일 규칙]
-- 색은 절제해서 써. 장기·세포·환자군·기기 등 대상을 사실적으로 나타내기 위한 채색은 허용하되, 단순히 강조하려고 알록달록하게 칠하지 마. 배경·도형·화살표는 흰색과 회색, 옅은 한두 가지 색조 위주로.
-- 저널 이름("NEJM" 등)이나 "graphical abstract"·"그래피컬 초록" 같은 제목/워터마크 문구를 이미지에 절대 넣지 마.
-- 라벨과 텍스트는 모두 한글로, 꼭 필요한 최소한만.`;
+[구성 — 논문 성격에 맞게 스스로 판단]
+- 이 논문이 어떤 종류인지(개입·치료 / 기전·분자 / 진단 / 역학 / 리뷰·메타분석 등)를 파악해 그에 맞는 논리 흐름으로 배치해. "대상 → 개입 → 효과" 같은 임상시험 틀을 모든 논문에 억지로 끼워맞추지 마.
+  · 개입·치료 연구 → 대상 → 개입 → 결과
+  · 기전·분자 연구 → 분자·경로의 인과 흐름(무엇이 무엇을 조절해 어떤 하류 효과로 이어지는지)
+  · 진단·바이오마커 연구 → 검사·지표 → 판별·예측
+  · 리뷰·메타분석 → 여러 근거의 통합 → 결론
+- 목표는 '무엇이 무엇에 어떻게 작용·연결되는가'라는 큰 그림. 세부가 아니라 구조와 흐름을 전달해.
+
+[반드시 지킬 것 — 가짜 수치 방지]
+- 구체적 수치를 이미지에 그리지 마. 효과크기·신뢰구간·p값·퍼센트·측정값·차트 눈금 등 숫자를 넣지 마(모델이 지어낸 가짜 숫자가 되어 오해를 부른다). 증감·크기·방향·인과는 화살표(↑ ↓ →)와 상대적 크기, 아이콘으로만 표현해.
+- 막대그래프·포레스트플롯·수치 표 같은 '데이터 차트'를 그리지 마. 개념을 아이콘·도식·흐름도로 표현해.
+- 위에 주어진 내용에 없는 사실을 지어내지 마.
+
+[스타일]
+- 색은 절제. 장기·세포·환자군·기기 등 대상을 사실적으로 나타내는 채색은 허용하되, 강조하려고 알록달록하게 칠하지 마. 흰색·회색 + 옅은 한두 색조 위주.
+- 저널 이름이나 "graphical abstract"·"그래피컬 초록" 같은 제목/워터마크 문구를 절대 넣지 마.
+- 글자는 전부 한글, 꼭 필요한 최소한만. 작은 글씨로 라벨을 빽빽하게 달지 말고(작은 한글은 깨지기 쉬움) 큰 글씨 위주로 최소한만 써.`;
 }
 
 // ── OpenAI gpt-image-1 ─────────────────────────────────────────────
