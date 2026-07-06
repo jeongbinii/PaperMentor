@@ -63,7 +63,7 @@ function clipText(s: string, n: number): string {
 export function isPlaceholder(text: string): boolean {
   const t = (text || "").trim();
   if (!t) return true;
-  return /(명시되어 있지 않|명시되지 않|제공된 초록|확인할 수 없|포함되어 있지 않|기술되어 있지 않|나와 있지 않|제시되어 있지 않|알 수 없)/.test(
+  return /(명시되어 있지 않|명시되지 않|제공된 초록|확인할 수 없|포함되어 있지 않|기술되어 있지 않|나와 있지 않|제시되어 있지 않|알 수 없|not specified|not stated|not reported|not provided|not available|not mentioned|not described)/i.test(
     t,
   );
 }

@@ -758,6 +758,10 @@ export default function Home() {
   const [imageModel, setImageModel] = useState<string>("gemini-3-pro-image");
   const [imageQuality, setImageQuality] = useState<string>("");
 
+  // 요약 언어(한/영 토글). 의학용어는 영어 원어가 더 명확한 경우가 있어 선택 가능.
+  const [summaryLang, setSummaryLang] = useState<"ko" | "en">("ko");
+  const [summaryLangLoading, setSummaryLangLoading] = useState(false);
+
   // 발표 슬라이드(.pptx) 다운로드 상태
   const [slidesMode, setSlidesMode] = useState<null | "compose" | "llm">(null);
   const [slidesError, setSlidesError] = useState<string | null>(null);
@@ -775,6 +779,7 @@ export default function Home() {
         title: paper.title,
         abstract: paper.abstract,
         fullText: paper.fullText,
+        lang: summaryLang,
       }),
     });
     const summaryData = await summaryRes.json();
@@ -861,6 +866,38 @@ export default function Home() {
       // localStorage 불가 환경 무시
     }
     setShowWelcome(false);
+  }
+
+  // 요약 언어 전환 — 현재 논문을 선택 언어로 재요약(LLM 재실행)해 요약만 교체.
+  async function switchSummaryLang(lang: "ko" | "en") {
+    if (!loadedPaper || summaryLangLoading || lang === summaryLang) return;
+    const prevLang = summaryLang;
+    setSummaryLang(lang);
+    setSummaryLangLoading(true);
+    try {
+      const res = await fetch("/api/summarize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: loadedPaper.paper.title,
+          abstract: loadedPaper.paper.abstract,
+          fullText: loadedPaper.paper.fullText,
+          lang,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.summary) {
+        setLoadedPaper((prev) =>
+          prev ? { ...prev, summary: data.summary } : prev,
+        );
+      } else {
+        setSummaryLang(prevLang); // 실패 시 토글 원복(기존 요약 유지)
+      }
+    } catch {
+      setSummaryLang(prevLang);
+    } finally {
+      setSummaryLangLoading(false);
+    }
   }
 
   async function handleAnalyzePaper(queryOverride?: string) {
@@ -2143,6 +2180,37 @@ export default function Home() {
                   </div>
                 )}
               </section>
+
+              {/* 요약 언어 전환 (한/영) — 의학용어는 영어 원어가 더 명확한 경우가 있음 */}
+              <div className="flex items-center justify-end gap-2">
+                <span className="text-[12px] text-slate-500">요약 언어</span>
+                <div className="flex items-center gap-1">
+                  {(
+                    [
+                      ["ko", "한국어"],
+                      ["en", "English"],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <button
+                      key={key}
+                      onClick={() => switchSummaryLang(key)}
+                      disabled={summaryLangLoading}
+                      className={`rounded-full px-2.5 py-1 text-[12px] font-medium transition-colors disabled:opacity-50 ${
+                        summaryLang === key
+                          ? "bg-blue-600 text-white"
+                          : "bg-zinc-100 text-slate-600 hover:bg-zinc-200"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {summaryLangLoading && (
+                  <span className="text-[11px] text-slate-400 animate-pulse">
+                    전환 중…
+                  </span>
+                )}
+              </div>
 
               {loadedPaper.summary.keyFindings?.length > 0 && (
                 <section className="rounded-xl border border-blue-200/70 bg-blue-50/50 p-4">

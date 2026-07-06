@@ -68,6 +68,18 @@ const SYSTEM_PROMPT = `당신은 의학 논문 학습을 돕는 한국어 AI 튜
   "keyMessage": "결론과 중복되지 않도록, 의대생이 이 논문 한 줄로 기억할 take-home 1~2문장. 결론이 '무엇이 밝혀졌나'라면 핵심 메시지는 '그래서 학습자가 어떻게 받아들여야 하나."
 }`;
 
+// 영어 요약 모드: 한국어로 쓰인 위 규칙을 그대로 따르되 "출력만" 영어로.
+// (프롬프트를 한/영 두 벌로 복제하지 않고 언어 스위치만 얹는다.)
+const EN_OVERRIDE = `[OUTPUT LANGUAGE — HIGHEST PRIORITY OVERRIDE]
+Produce every output field value in ENGLISH. The rules below are written in Korean and describe WHAT to produce, but your OUTPUT must be natural, clear English for medical students.
+- Use standard English medical terminology; do not insert Korean. For an uncommon term, add a short plain-English definition in parentheses (instead of a Korean gloss).
+- Wherever a rule tells you to write a Korean placeholder such as "본문에 명시되어 있지 않습니다.", write "Not specified in the text." instead.
+- keyFindings.source must remain the verbatim original-paper sentence (usually English) — never translate it.`;
+
+function systemFor(lang: unknown): string {
+  return lang === "en" ? `${EN_OVERRIDE}\n\n${SYSTEM_PROMPT}` : SYSTEM_PROMPT;
+}
+
 function tryParse(s: string): unknown | undefined {
   try {
     return JSON.parse(s);
@@ -148,7 +160,7 @@ function extractJson(text: string): StructuredSummary {
 
 export async function POST(request: Request) {
   try {
-    const { title, abstract, fullText } = await request.json();
+    const { title, abstract, fullText, lang } = await request.json();
 
     if (!abstract || typeof abstract !== "string") {
       return NextResponse.json(
@@ -170,7 +182,7 @@ export async function POST(request: Request) {
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 5120,
-      system: SYSTEM_PROMPT,
+      system: systemFor(lang),
       messages: [{ role: "user", content: userContent }],
     });
 
