@@ -18,6 +18,11 @@ const GEMINI_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-3-pro-image";
 // (기존 30s → 55s). Pro가 느려도 끝까지 반환하면 잘라내지 않게. env로 상한 조정 가능.
 const GEMINI_TIMEOUT_MS =
   Number(process.env.GEMINI_IMAGE_TIMEOUT_MS) || (maxDuration - 5) * 1000;
+// 위 예산(GEMINI_TIMEOUT_MS) 안에서 최대 몇 번까지 재시도할지.
+// Pro의 "HTTP200 빈 이미지"·혼잡 같은 일시 실패는 즉시 나므로, 시간이 남는 한
+// 같은 3.0 Pro로 다시 찔러본다(다른 모델 폴백 아님). Hobby(60s 상한)에서 가장 효과적.
+const GEMINI_MAX_ATTEMPTS = Number(process.env.GEMINI_IMAGE_MAX_ATTEMPTS) || 4;
+const GEMINI_RETRY_BACKOFF_MS = 800;
 
 // UI에서 선택 가능한 이미지 모델/품질 화이트리스트(임의 값 차단). 목록 밖이면 기본값 사용.
 const GEMINI_MODELS = ["gemini-3-pro-image", "gemini-2.5-flash-image"];
@@ -118,11 +123,21 @@ async function generateOpenAI(
 }
 
 // ── Google Gemini ──────────────────────────────────────────────────
-// transient=true 인 에러는 상위에서 폴백 모델 재시도 신호로 쓴다(혼잡·시간초과·일시장애).
-async function generateGemini(apiKey: string, prompt: string, model: string) {
+// transient=true 인 에러는 예산 안에서 재시도 신호로 쓴다(혼잡·시간초과·빈 응답).
+type GenResult =
+  | { image: string; note?: string }
+  | { error: string; status: number; transient?: boolean; note?: string };
+
+// 1회 시도. timeoutMs 안에 응답이 없으면 abort → transient 에러.
+async function generateGeminiOnce(
+  apiKey: string,
+  prompt: string,
+  model: string,
+  timeoutMs: number,
+): Promise<GenResult> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), GEMINI_TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res: Response;
   try {
     res = await fetch(url, {
@@ -135,9 +150,9 @@ async function generateGemini(apiKey: string, prompt: string, model: string) {
       signal: ctrl.signal,
     });
   } catch {
-    // abort(시간초과) 또는 네트워크 오류 → 폴백 대상
+    // abort(시간초과) 또는 네트워크 오류 → 재시도 대상
     return {
-      error: `Gemini(${model}) 응답이 ${Math.round(GEMINI_TIMEOUT_MS / 1000)}초 내 오지 않았습니다.`,
+      error: `Gemini(${model}) 응답이 ${Math.round(timeoutMs / 1000)}초 내 오지 않았습니다.`,
       status: 504,
       transient: true,
     };
@@ -148,7 +163,7 @@ async function generateGemini(apiKey: string, prompt: string, model: string) {
   const data = await res.json();
   if (!res.ok) {
     const msg = data?.error?.message || `Gemini API 오류 (${res.status})`;
-    // 혼잡·게이트웨이·일시장애는 폴백으로 넘긴다
+    // 혼잡·게이트웨이·일시장애는 재시도
     const transient = [429, 500, 502, 503, 504].includes(res.status);
     return { error: msg, status: res.status, transient };
   }
@@ -166,6 +181,7 @@ async function generateGemini(apiKey: string, prompt: string, model: string) {
   }
   if (!image)
     return {
+      // HTTP 200인데 이미지가 없는 케이스(Pro 서빙 불안정 시 잦음) — 재시도 대상.
       error:
         "Gemini가 이미지를 반환하지 않았습니다. 모델 ID(GEMINI_IMAGE_MODEL)를 확인하세요.",
       status: 502,
@@ -173,6 +189,37 @@ async function generateGemini(apiKey: string, prompt: string, model: string) {
       note,
     };
   return { image, note };
+}
+
+// 데드라인(GEMINI_TIMEOUT_MS) 예산 안에서 같은 3.0 Pro를 재시도한다(폴백 아님).
+// - 성공하면 즉시 반환.
+// - "빈 이미지·혼잡·시간초과" 같은 일시 실패는 시간이 남는 한 다시 시도(빈 응답은 즉시
+//   나므로 55초 안에 여러 번 가능 → 성공 확률↑). Hobby(60s 상한)에서 타임아웃 연장 대신 쓰는 지렛대.
+// - 단일 시도가 오래 걸려도(느리게라도 완성되는 경우) 예산을 다 쓰도록 남은 시간을 통째로 준다.
+// - 잘못된 모델 ID 등 하드 에러(transient=false)면 재시도 없이 그대로 반환.
+async function generateGemini(
+  apiKey: string,
+  prompt: string,
+  model: string,
+): Promise<GenResult> {
+  const deadline = Date.now() + GEMINI_TIMEOUT_MS;
+  let last: GenResult = {
+    error: "Gemini 요청을 시작하지 못했습니다.",
+    status: 500,
+    transient: true,
+  };
+  for (let attempt = 1; attempt <= GEMINI_MAX_ATTEMPTS; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining < 3000) break; // 남은 시간이 너무 적으면 무의미한 시도 중단
+    last = await generateGeminiOnce(apiKey, prompt, model, remaining);
+    if ("image" in last) return last; // 성공
+    if (!last.transient) return last; // 하드 에러 → 재시도 무의미
+    // 일시 실패 → 시간이 남을 때만 짧은 백오프 후 재시도
+    if (Date.now() + GEMINI_RETRY_BACKOFF_MS < deadline) {
+      await new Promise((r) => setTimeout(r, GEMINI_RETRY_BACKOFF_MS));
+    }
+  }
+  return last;
 }
 
 // ── Replicate (Flux / Ideogram 등, 인증 불필요한 결제) ──────────────
@@ -288,10 +335,14 @@ export async function POST(request: Request) {
       );
     }
 
-    if ("error" in result && result.error) {
+    // image가 있으면 성공, 없으면 에러 경로(재시도까지 소진 후에도 실패한 경우 포함).
+    if (!("image" in result) || !result.image) {
+      const error =
+        "error" in result ? result.error : "이미지 생성에 실패했습니다.";
+      const status = "status" in result ? result.status : 500;
       return NextResponse.json(
-        { error: result.error, note: "note" in result ? result.note : undefined },
-        { status: result.status ?? 500 },
+        { error, note: "note" in result ? result.note : undefined },
+        { status: status ?? 500 },
       );
     }
 
