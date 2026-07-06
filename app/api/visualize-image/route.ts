@@ -50,21 +50,23 @@ function buildPrompt(
   },
   labelLang: "ko" | "en",
 ): string {
-  const { title, keyFindings, methods, results, conclusion } = body;
-  const kf = Array.isArray(keyFindings)
+  const { title, keyFindings, conclusion } = body;
+  // 그래피컬 애브스트랙트는 '핵심 스토리'만 있으면 된다. 방법·결과 본문과 근거 수치(CI·p값)까지
+  // 넣으면 추론형 이미지 모델(Nano Banana Pro)이 파싱·계획하는 부담이 커져 생성이 느려지고(60초+)
+  // 그림도 산만해진다. → 주제 + 핵심 주장 최대 3개(수치 없이) + 한 줄 결론으로 압축.
+  const claims = Array.isArray(keyFindings)
     ? keyFindings
-        .map(
-          (f, i) =>
-            `${i + 1}. ${f.claim ?? ""}${f.evidence ? `\n   - 근거: ${f.evidence}` : ""}`,
-        )
+        .filter((f) => f.claim && f.claim.trim())
+        .slice(0, 3)
+        .map((f, i) => `${i + 1}. ${(f.claim ?? "").trim()}`)
         .join("\n")
     : "";
+  const clip = (s: string, n = 180) =>
+    s.length > n ? `${s.slice(0, n).replace(/[\s,.;·]+$/, "")}…` : s;
   const paperText = [
-    title ? `제목: ${title}` : "",
-    kf ? `핵심 결과:\n${kf}` : "",
-    methods ? `연구 방법: ${methods}` : "",
-    results ? `주요 결과: ${results}` : "",
-    conclusion ? `결론: ${conclusion}` : "",
+    title ? `주제: ${title}` : "",
+    claims ? `핵심 메시지:\n${claims}` : "",
+    conclusion ? `결론: ${clip(conclusion)}` : "",
   ]
     .filter(Boolean)
     .join("\n\n");
