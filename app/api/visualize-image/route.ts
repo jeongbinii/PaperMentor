@@ -1,4 +1,7 @@
 import { NextResponse } from "next/server";
+import Anthropic from "@anthropic-ai/sdk";
+
+const anthropic = new Anthropic();
 
 export const runtime = "nodejs";
 // Vercel 함수 실행 상한(초). 플랜 한도: Hobby=60, Pro=최대 300.
@@ -43,22 +46,17 @@ export type ImageProvider = "gemini" | "openai" | "flux" | "ideogram";
 
 type KeyFinding = { claim?: string; evidence?: string };
 
-// labelLang: 그림에 렌더링할 라벨 언어. "ko"=Gemini(한글 렌더링 우수),
-// "en"=GPT 등(한글이 깨지는 모델 → 영어 라벨로 우회).
-function buildPrompt(
-  body: {
-    title?: string;
-    keyFindings?: KeyFinding[];
-    methods?: string;
-    results?: string;
-    conclusion?: string;
-  },
-  labelLang: "ko" | "en",
-): string {
+type PromptBody = {
+  title?: string;
+  keyFindings?: KeyFinding[];
+  methods?: string;
+  results?: string;
+  conclusion?: string;
+};
+
+// 요약에서 이미지용 핵심 스토리만 추출(주제 + 핵심주장 최대 3개 + 한 줄 결론, 수치 제외).
+function coreContent(body: PromptBody): string {
   const { title, keyFindings, conclusion } = body;
-  // 그래피컬 애브스트랙트는 '핵심 스토리'만 있으면 된다. 방법·결과 본문과 근거 수치(CI·p값)까지
-  // 넣으면 추론형 이미지 모델(Nano Banana Pro)이 파싱·계획하는 부담이 커져 생성이 느려지고(60초+)
-  // 그림도 산만해진다. → 주제 + 핵심 주장 최대 3개(수치 없이) + 한 줄 결론으로 압축.
   const claims = Array.isArray(keyFindings)
     ? keyFindings
         .filter((f) => f.claim && f.claim.trim())
@@ -66,15 +64,113 @@ function buildPrompt(
         .map((f, i) => `${i + 1}. ${(f.claim ?? "").trim()}`)
         .join("\n")
     : "";
-  const clip = (s: string, n = 180) =>
-    s.length > n ? `${s.slice(0, n).replace(/[\s,.;·]+$/, "")}…` : s;
-  const paperText = [
+  const conc =
+    conclusion && conclusion.length > 180
+      ? `${conclusion.slice(0, 180).replace(/[\s,.;·]+$/, "")}…`
+      : conclusion;
+  return [
     title ? `주제: ${title}` : "",
     claims ? `핵심 메시지:\n${claims}` : "",
-    conclusion ? `결론: ${clip(conclusion)}` : "",
+    conc ? `결론: ${conc}` : "",
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+const BLUEPRINT_SYSTEM = `당신은 의학 논문을 '개념 시각화 이미지 한 장'으로 그리기 위한 레이아웃 설계도를 짜는 전문가입니다. 이미지 생성 모델이 헷갈리지 않고 그대로 그릴 수 있도록, 논문의 논리 구조를 간결한 설계도로 정리합니다.
+
+[원칙]
+- 먼저 논문 유형을 판단하고(개입·치료 / 기전·분자 / 진단·바이오마커 / 역학 / 리뷰·메타분석 등) 그 유형에 맞는 구조로 배치합니다. "대상-개입-효과" 틀을 모든 논문에 억지로 쓰지 마십시오.
+  · 개입·치료 → 대상 → 개입 → 결과
+  · 기전·분자 → 분자·경로의 인과 흐름(무엇이 무엇을 조절해 어떤 하류 효과로 이어지는지)
+  · 진단·바이오마커 → 검사·지표 → 판별·예측
+  · 리뷰·메타분석 → 여러 근거 → 통합 결론
+- 주어진 요약에 있는 내용만 사용합니다. 없는 사실·수치를 지어내지 마십시오.
+- 구체 수치(효과크기·신뢰구간·p값·퍼센트)는 설계도에 넣지 마십시오. 증감·방향은 ↑ ↓ 로만 표시합니다.
+- 짧고 명료하게. 이 설계도는 이미지 모델이 읽고 그대로 그릴 렌더 지시입니다.
+
+[출력 — 아래 형식 그대로, 다른 말 없이]
+유형: <논문 유형>
+전체배치: <전체 구조를 한 줄로. 예: "왼쪽→오른쪽 3단계 흐름" 또는 "중앙 분자경로 + 오른쪽 결핍 시 대비">
+요소:
+- <노드/그룹>: <그릴 대상과 짧은 라벨>
+(핵심 요소 3~6개)
+흐름: <노드 간 연결을 화살표로. 예: "저산소 → HIF-2α → Sema3G → β-카테닌 안정 → 정상 혈관">
+결론: <이미지 하단에 넣을 한 줄 결론>`;
+
+// Claude가 논문 유형에 맞는 '레이아웃 설계도'를 먼저 짠다 → 이미지 모델은 구조를 추론하지 않고
+// 렌더만 하면 되므로 더 빠르고 정확해진다. 실패/빈 결과 시 ""를 반환해 직접 프롬프트로 폴백한다.
+async function buildLayoutBlueprint(
+  body: PromptBody,
+  labelLang: "ko" | "en",
+): Promise<string> {
+  const content = coreContent(body);
+  if (!content.trim()) return "";
+  const system =
+    labelLang === "en"
+      ? `${BLUEPRINT_SYSTEM}\n\n[LANGUAGE] 요소·흐름·결론 등 설계도의 모든 라벨을 영어로 작성하십시오(형식 키워드 '유형/전체배치/요소/흐름/결론'은 그대로).`
+      : BLUEPRINT_SYSTEM;
+  try {
+    const resp = await anthropic.messages.create(
+      {
+        model: "claude-sonnet-4-6",
+        max_tokens: 700,
+        system,
+        messages: [{ role: "user", content }],
+      },
+      { timeout: 20000 },
+    );
+    const text = resp.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("\n")
+      .trim();
+    return text.length > 20 ? text : "";
+  } catch {
+    return "";
+  }
+}
+
+// labelLang: 그림에 렌더링할 라벨 언어. "ko"=Gemini(한글 렌더링 우수),
+// "en"=GPT 등(한글이 깨지는 모델 → 영어 라벨로 우회).
+function buildPrompt(
+  body: PromptBody,
+  labelLang: "ko" | "en",
+  blueprint?: string,
+): string {
+  const bp = (blueprint ?? "").trim();
+  if (bp) {
+    // 설계도 기반: 이미지 모델은 구조를 추론하지 않고 그대로 렌더만 한다.
+    if (labelLang === "en") {
+      return `${bp}
+
+Draw a single conceptual image exactly following the blueprint above. Draw the image itself, not explanatory prose. Preserve the arrow connections in the flow so it reads at a glance.
+
+[Must follow]
+- No specific numbers, percentages, or chart axis ticks. No bar charts, forest plots, or numeric tables. Show increase/decrease and direction only with arrows and relative sizes and icons.
+- Do not add anything not in the blueprint.
+
+[Style]
+- Restrained color: mostly white, gray, and one or two pale tones. Realistic coloring of targets (organs/cells/patient groups) only; no colorful highlights for emphasis.
+- No journal name or "graphical abstract" watermark text.
+- All labels in clear, correctly spelled English, large and minimal — no dense small labels.`;
+    }
+    return `${bp}
+
+위 '설계도'대로 한 장의 개념 시각화 이미지를 그려줘. 설명하는 글이 아니라 그림 자체를 그려. '흐름'의 화살표 연결을 살려 한눈에 읽히게 배치해.
+
+[반드시 지킬 것]
+- 구체적 수치·퍼센트·차트 눈금을 넣지 마. 막대그래프·포레스트플롯·수치표 금지. 증감·크기·방향은 화살표(↑ ↓ →)·상대크기·아이콘으로만.
+- 설계도에 없는 내용을 새로 지어내지 마.
+
+[스타일]
+- 색 절제: 흰색·회색 + 옅은 한두 색조. 장기·세포·환자군 등 대상의 사실적 채색만 허용, 강조용 알록달록 금지.
+- 저널 이름이나 "graphical abstract"·"그래피컬 초록" 같은 워터마크 문구 금지.
+- 글자는 전부 한글, 큰 글씨로 꼭 필요한 최소한만(작은 글씨 라벨 빽빽하게 달지 마).`;
+  }
+
+  // 폴백: 설계도 생성 실패 시 요약 내용 기반(유형별 구조는 이미지 모델이 판단).
+  const paperText = coreContent(body);
 
   if (labelLang === "en") {
     // 원문 데이터는 한글이므로, 라벨은 영어로 번역해 그리라고 명시(한글 렌더링 깨짐 회피).
@@ -330,7 +426,11 @@ export async function POST(request: Request) {
     ) as ImageProvider;
 
     // 한글 렌더링이 우수한 Gemini만 한글 라벨, 나머지(GPT 등)는 영어 라벨로 우회.
-    const prompt = buildPrompt(body, provider === "gemini" ? "ko" : "en");
+    const labelLang: "ko" | "en" = provider === "gemini" ? "ko" : "en";
+    // ① Claude가 논문 유형에 맞는 레이아웃 설계도를 먼저 짜고(실패 시 "" → 직접 프롬프트 폴백),
+    // ② 이미지 모델은 그 설계도를 렌더만 한다(추론 부담↓ → 더 빠르고 정확).
+    const blueprint = await buildLayoutBlueprint(body, labelLang);
+    const prompt = buildPrompt(body, labelLang, blueprint);
 
     // UI에서 지정한 모델/품질(화이트리스트 검증, 없으면 기본값).
     const reqModel = typeof body.model === "string" ? body.model : "";
