@@ -29,8 +29,9 @@ const WELCOME_KEY = "pm_onboarding_v2";
 const FONT_SCALE_KEY = "pm_font_scale";
 // 글자 크기(루트 폰트) 단계 — rem 기반 텍스트가 함께 커짐
 const FONT_MIN = 14;
-const FONT_MAX = 21;
-const FONT_DEFAULT = 16;
+const FONT_MAX = 22;
+// 가독성 개선(교수 자문): 기본 글자 크기를 키움. rem 기반 본문이 함께 커진다.
+const FONT_DEFAULT = 17;
 
 // 우측 기능 패널 전체 마스터 스위치. 개별 탭은 위 탭 배열에서 가감한다.
 // (시각화 탭은 중앙으로 이동, 신뢰도 탭은 일시 비활성화 — 렌더 블록은 보존)
@@ -1414,7 +1415,7 @@ export default function Home() {
                 />
               ))}
               {(fig.label || fig.caption) && (
-                <figcaption className="mt-1 text-[11px] leading-relaxed text-zinc-500">
+                <figcaption className="mt-1 text-[12.5px] leading-relaxed text-zinc-500">
                   {fig.label && (
                     <span className="font-semibold text-zinc-600">
                       {fig.label}.{" "}
