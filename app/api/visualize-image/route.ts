@@ -11,8 +11,9 @@ export const maxDuration = 60;
 const OPENAI_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
 const OPENAI_SIZE = process.env.OPENAI_IMAGE_SIZE || "1536x1024"; // 가로형 (graphical abstract)
 const OPENAI_QUALITY = process.env.OPENAI_IMAGE_QUALITY || "medium"; // low | medium | high
-// 한글 텍스트 품질이 좋은 상위 이미지 모델(Nano Banana Pro). 비용↑이나 결과물 차원이 다름.
-const GEMINI_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-3-pro-image";
+// 기본은 3.1 Flash Lite — 한글 렌더링 우수 + ~4초로 빠름(Pro는 30~90초라 Hobby 60초 벽에 자주 걸림).
+// Pro(gemini-3-pro-image)는 UI에서 "고품질·느림" 옵션으로 수동 선택.
+const GEMINI_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-lite-image";
 // Gemini 1회 시도 제한(ms). 행(무한 대기)만 막고 나머지는 최대한 기다려준다.
 // maxDuration에서 응답 파싱·네트워크 여유(5s)만 남기고 전부 이미지 생성에 쓴다
 // (기존 30s → 55s). Pro가 느려도 끝까지 반환하면 잘라내지 않게. env로 상한 조정 가능.
@@ -25,7 +26,11 @@ const GEMINI_MAX_ATTEMPTS = Number(process.env.GEMINI_IMAGE_MAX_ATTEMPTS) || 4;
 const GEMINI_RETRY_BACKOFF_MS = 800;
 
 // UI에서 선택 가능한 이미지 모델/품질 화이트리스트(임의 값 차단). 목록 밖이면 기본값 사용.
-const GEMINI_MODELS = ["gemini-3-pro-image", "gemini-2.5-flash-image"];
+const GEMINI_MODELS = [
+  "gemini-3.1-flash-lite-image",
+  "gemini-3-pro-image",
+  "gemini-3.1-flash-image",
+];
 const OPENAI_MODELS = ["gpt-image-1"];
 const OPENAI_QUALITIES = ["low", "medium", "high", "auto"];
 // Replicate 모델: flux(기본), ideogram(텍스트 특화). env로 교체 가능.

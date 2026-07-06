@@ -40,8 +40,8 @@ const SHOW_RIGHT_PANEL = true;
 // 시각화 요약 이미지에서 선택 가능한 모델/품질. value = "provider|model|quality".
 // Gemini는 한글 라벨, GPT(gpt-image-1)는 영어 라벨(한글 렌더 깨짐). GPT는 품질 등급으로 버전 조절.
 const IMAGE_MODEL_OPTIONS: { v: string; label: string }[] = [
-  { v: "gemini|gemini-3-pro-image|", label: "Gemini 3 Pro · 한글 (추천)" },
-  { v: "gemini|gemini-2.5-flash-image|", label: "Gemini 2.5 Flash · 한글·빠름" },
+  { v: "gemini|gemini-3.1-flash-lite-image|", label: "Gemini 3.1 Flash Lite · 빠름 (추천)" },
+  { v: "gemini|gemini-3-pro-image|", label: "Gemini 3 Pro · 고품질 (느림)" },
   { v: "openai|gpt-image-1|high", label: "GPT Image · 고품질 (영어)" },
   { v: "openai|gpt-image-1|medium", label: "GPT Image · 표준 (영어)" },
 ];
@@ -770,7 +770,7 @@ export default function Home() {
     "gemini" | "openai" | "flux" | "ideogram"
   >("gemini");
   // 선택된 이미지 모델/품질(드롭다운). provider와 함께 백엔드로 전달.
-  const [imageModel, setImageModel] = useState<string>("gemini-3-pro-image");
+  const [imageModel, setImageModel] = useState<string>("gemini-3.1-flash-lite-image");
   const [imageQuality, setImageQuality] = useState<string>("");
 
   // 이미지 생성 중에만 1초 단위로 경과 시간을 올린다(진행바·"n초 경과" 표시용).
