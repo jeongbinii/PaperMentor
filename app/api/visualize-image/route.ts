@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
-export const maxDuration = 60; // Pro 모델 시도 + 폴백 시도 여유
+// Vercel 함수 실행 상한(초). 플랜 한도: Hobby=60, Pro=최대 300.
+// Gemini Pro가 느리게라도 이미지를 끝까지 반환하도록 최대한 넉넉히 잡는다.
+// Pro 플랜이면 이 값을 120~180으로 올리면 아래 타임아웃도 자동으로 함께 늘어난다.
+export const maxDuration = 60;
 
 // 이미지 생성 제공자: 환경변수에 있는 키로 자동 선택 (OpenAI 우선, 없으면 Gemini).
 // 모델은 OPENAI_IMAGE_MODEL / GEMINI_IMAGE_MODEL 로 교체 가능.
@@ -10,8 +13,11 @@ const OPENAI_SIZE = process.env.OPENAI_IMAGE_SIZE || "1536x1024"; // 가로형 (
 const OPENAI_QUALITY = process.env.OPENAI_IMAGE_QUALITY || "medium"; // low | medium | high
 // 한글 텍스트 품질이 좋은 상위 이미지 모델(Nano Banana Pro). 비용↑이나 결과물 차원이 다름.
 const GEMINI_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-3-pro-image";
-// 기본 모델 1회 시도 제한(ms). 초과하면 행 대신 에러 반환 — Pro가 붐빌 때 오래 매달리지 않게.
-const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_IMAGE_TIMEOUT_MS) || 30000;
+// Gemini 1회 시도 제한(ms). 행(무한 대기)만 막고 나머지는 최대한 기다려준다.
+// maxDuration에서 응답 파싱·네트워크 여유(5s)만 남기고 전부 이미지 생성에 쓴다
+// (기존 30s → 55s). Pro가 느려도 끝까지 반환하면 잘라내지 않게. env로 상한 조정 가능.
+const GEMINI_TIMEOUT_MS =
+  Number(process.env.GEMINI_IMAGE_TIMEOUT_MS) || (maxDuration - 5) * 1000;
 
 // UI에서 선택 가능한 이미지 모델/품질 화이트리스트(임의 값 차단). 목록 밖이면 기본값 사용.
 const GEMINI_MODELS = ["gemini-3-pro-image", "gemini-2.5-flash-image"];

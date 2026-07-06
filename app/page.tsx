@@ -46,6 +46,16 @@ const IMAGE_MODEL_OPTIONS: { v: string; label: string }[] = [
   { v: "openai|gpt-image-1|medium", label: "GPT Image · 표준 (영어)" },
 ];
 
+// 요약 도착 전(Phase 1)에 논문을 먼저 렌더링하기 위한 빈 요약 자리표시자.
+const EMPTY_SUMMARY: StructuredSummary = {
+  keyFindings: [],
+  background: "",
+  methods: "",
+  results: "",
+  conclusion: "",
+  keyMessage: "",
+};
+
 type ChatMessage = {
   role: "user" | "assistant";
   text: string;
@@ -751,12 +761,31 @@ export default function Home() {
   const [guideError, setGuideError] = useState<string | null>(null);
   const [geminiLoading, setGeminiLoading] = useState(false);
   const [geminiError, setGeminiError] = useState<string | null>(null);
+  // 이미지 생성 경과 시간(초) — 진행바·경과표시로 체감 대기시간을 낮춘다.
+  const [imageElapsed, setImageElapsed] = useState(0);
+  // 요약(Phase 2) 진행/실패 상태 — 논문은 먼저 뜨고 요약만 스켈레톤으로 채운다.
+  const [summaryPending, setSummaryPending] = useState(false);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
   const [imageProvider, setImageProvider] = useState<
     "gemini" | "openai" | "flux" | "ideogram"
   >("gemini");
   // 선택된 이미지 모델/품질(드롭다운). provider와 함께 백엔드로 전달.
   const [imageModel, setImageModel] = useState<string>("gemini-3-pro-image");
   const [imageQuality, setImageQuality] = useState<string>("");
+
+  // 이미지 생성 중에만 1초 단위로 경과 시간을 올린다(진행바·"n초 경과" 표시용).
+  useEffect(() => {
+    if (!geminiLoading) {
+      setImageElapsed(0);
+      return;
+    }
+    const started = Date.now();
+    const id = setInterval(
+      () => setImageElapsed(Math.floor((Date.now() - started) / 1000)),
+      250,
+    );
+    return () => clearInterval(id);
+  }, [geminiLoading]);
 
   // 요약 언어(한/영 토글). 의학용어는 영어 원어가 더 명확한 경우가 있어 선택 가능.
   const [summaryLang, setSummaryLang] = useState<"ko" | "en">("ko");
@@ -770,33 +799,19 @@ export default function Home() {
     { mode: "compose" | "llm"; slides: number; figures: number } | null
   >(null);
 
-  // 논문(메타+초록)을 받아 요약 생성 후 상태에 적재 — PMID/DOI 경로와 PDF 경로가 공유
+  // 논문(메타+초록)을 받아 화면에 적재 — PMID/DOI 경로와 PDF 경로가 공유.
+  // 2단계로 나눠 체감 대기시간을 낮춘다:
+  //   Phase 1 — 논문 메타·원문·그림을 즉시 렌더(요약은 스켈레톤 자리표시자).
+  //   Phase 2 — 요약이 도착하면 스켈레톤을 실제 내용으로 채우고 후속 도구를 프리페치.
+  // "빈 화면 → 한꺼번에 등장"이 아니라 원문이 먼저 뜨고 요약이 흘러들어오게 한다.
   async function summarizeAndLoad(paper: PubMedPaper, pdfUrl?: string) {
-    const summaryRes = await fetch("/api/summarize", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        title: paper.title,
-        abstract: paper.abstract,
-        fullText: paper.fullText,
-        lang: summaryLang,
-      }),
-    });
-    const summaryData = await summaryRes.json();
-    if (!summaryRes.ok) {
-      throw new Error(summaryData.error ?? "요약 생성에 실패했습니다.");
-    }
-
-    const loaded: LoadedPaper = {
-      paper,
-      summary: summaryData.summary as StructuredSummary,
-      pdfUrl,
-    };
-    setLoadedPaper(loaded);
+    // ── Phase 1: 논문을 먼저 렌더(요약은 자리표시자) ──────────────────
+    const pending: LoadedPaper = { paper, summary: EMPTY_SUMMARY, pdfUrl };
+    setLoadedPaper(pending);
+    setSummaryPending(true);
+    setSummaryError(null);
+    setPaperLoading(false); // 전체 로더 해제 → 좌측 원문·그림 + 요약 스켈레톤이 곧바로 보임
     setMobileView("summary"); // 모바일: 분석 직후 핵심요약 패널로 전환
-    // 로그인 상태면 분석을 히스토리에 저장(실패해도 분석엔 영향 없음).
-    // 북마크 여부는 아래 [user, 논문] useEffect가 동기화한다.
-    void saveAnalysis(paper, loaded.summary);
     setChatHistory([]);
     setQuizAnswers({});
     setActiveTab("guide");
@@ -806,20 +821,63 @@ export default function Home() {
     setOriginalView(paper.bodyText ? "text" : pdfUrl ? "pdf" : "text");
     setRecentPapers((prev) => {
       const without = prev.filter((p) => p.paper.pmid !== paper.pmid);
-      return [loaded, ...without].slice(0, 10);
+      return [pending, ...without].slice(0, 10);
     });
 
-    // 시각화 요약 이미지 자동 생성 (Gemini) — 사용자 요청 없이 분석 직후 생성
-    if (!loaded.geminiImage) {
-      handleGenerateImage(loaded, "gemini");
+    // ── Phase 2: 요약 생성 후 적재 ────────────────────────────────
+    await loadSummary(paper, pdfUrl);
+  }
+
+  // 현재 논문의 요약을 생성해 적재하고, 이미지·사전·읽기도구 프리페치를 시작한다.
+  // 최초 적재(summarizeAndLoad)와 "요약 다시 시도" 버튼이 공유한다.
+  async function loadSummary(paper: PubMedPaper, pdfUrl?: string) {
+    setSummaryPending(true);
+    setSummaryError(null);
+    let summary: StructuredSummary;
+    try {
+      const summaryRes = await fetch("/api/summarize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: paper.title,
+          abstract: paper.abstract,
+          fullText: paper.fullText,
+          lang: summaryLang,
+        }),
+      });
+      const summaryData = await summaryRes.json();
+      if (!summaryRes.ok) {
+        throw new Error(summaryData.error ?? "요약 생성에 실패했습니다.");
+      }
+      summary = summaryData.summary as StructuredSummary;
+    } catch (e) {
+      setSummaryError(
+        e instanceof Error ? e.message : "요약 생성에 실패했습니다.",
+      );
+      setSummaryPending(false);
+      return;
     }
+
+    const loaded: LoadedPaper = { paper, summary, pdfUrl };
+    // 사용자가 그새 다른 논문을 열었으면 덮어쓰지 않는다(경쟁 조건 가드).
+    setLoadedPaper((prev) =>
+      prev && prev.paper.pmid === paper.pmid ? { ...prev, summary } : prev,
+    );
+    setRecentPapers((prev) =>
+      prev.map((p) => (p.paper.pmid === paper.pmid ? { ...p, summary } : p)),
+    );
+    setSummaryPending(false);
+    // 로그인 상태면 분석을 히스토리에 저장(실패해도 분석엔 영향 없음).
+    // 북마크 여부는 아래 [user, 논문] useEffect가 동기화한다.
+    void saveAnalysis(paper, summary);
+
+    // 시각화 요약 이미지 자동 생성 (Gemini) — 요약이 준비된 뒤 시작
+    handleGenerateImage(loaded, "gemini");
     // 의학용어 사전 자동 생성 — 요약·원문 인라인 호버에 사용
-    if (!loaded.translation) {
-      handleTranslate(loaded);
-    }
+    handleTranslate(loaded);
     // 우측 읽기 도구 미리 생성(프리페치) — 탭 클릭 후 대기 제거.
-    // 각 핸들러는 (target.X || loading) 가드가 있어 중복 호출/이후 탭 클릭과 충돌하지 않음.
-    // 공용 계정 버스트 완화: 기본 탭(가이드)만 즉시, 나머지는 짧은 시차로 순차 실행(수 초 내 모두 준비).
+    // 각 핸들러는 (target.X || loading) 가드 + pmid 가드가 있어 중복/경쟁에 안전.
+    // 공용 계정 버스트 완화: 기본 탭(가이드)만 즉시, 나머지는 짧은 시차로 순차 실행.
     handleGuide(loaded);
     const prefetchRest = [
       () => handleStatistics(loaded),
@@ -832,7 +890,7 @@ export default function Home() {
     });
 
     // 형광펜(원문 근거) 기능 첫 사용 안내 — source가 있는 결과가 있고, 아직 안 봤을 때 1회
-    const hasSource = loaded.summary.keyFindings?.some((f) => f.source);
+    const hasSource = summary.keyFindings?.some((f) => f.source);
     if (
       hasSource &&
       typeof window !== "undefined" &&
@@ -1285,7 +1343,7 @@ export default function Home() {
 
   // 발표 슬라이드(.pptx) 생성·다운로드. compose=요약 그대로 조립, llm=AI 재구성.
   async function downloadSlides(mode: "compose" | "llm") {
-    if (!loadedPaper || slidesMode) return;
+    if (!loadedPaper || slidesMode || summaryPending) return;
     setSlidesMode(mode);
     setSlidesError(null);
     setSlidesResult(null);
@@ -2106,7 +2164,7 @@ export default function Home() {
                         setImageModel(m);
                         setImageQuality(q);
                       }}
-                      disabled={geminiLoading}
+                      disabled={geminiLoading || summaryPending}
                       className="rounded-md border border-zinc-200 bg-white px-2 py-1 text-[11px] text-zinc-700 disabled:opacity-50"
                     >
                       {IMAGE_MODEL_OPTIONS.map((o) => (
@@ -2126,12 +2184,7 @@ export default function Home() {
                   </div>
                 </div>
                 {geminiLoading ? (
-                  <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 py-10 text-sm text-zinc-400">
-                    <div className="animate-pulse">
-                      핵심 내용을 한 장의 그림으로 만드는 중입니다...
-                    </div>
-                    <div className="text-xs">(수십 초 소요)</div>
-                  </div>
+                  <ImageProgress elapsed={imageElapsed} />
                 ) : geminiError ? (
                   <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
                     <div className="mb-1 font-medium">
@@ -2166,6 +2219,11 @@ export default function Home() {
                       </span>
                     </div>
                   </div>
+                ) : summaryPending ? (
+                  <div className="flex items-center gap-2 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-400">
+                    <Spinner small />
+                    요약이 완료되면 시각화 요약을 자동으로 만듭니다.
+                  </div>
                 ) : (
                   <div className="flex items-center justify-between gap-2 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 p-3">
                     <span className="text-xs text-zinc-400">
@@ -2181,9 +2239,35 @@ export default function Home() {
                 )}
               </section>
 
-              {/* 요약 언어 전환 (한/영) — 의학용어는 영어 원어가 더 명확한 경우가 있음 */}
-              <div className="flex items-center justify-end gap-2">
-                <span className="text-[12px] text-slate-500">요약 언어</span>
+              {/* 요약 상태: 생성 중=스켈레톤 · 실패=재시도 · 완료=실제 내용 */}
+              {summaryPending ? (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 text-sm text-slate-500">
+                    <Spinner />
+                    <span>
+                      Claude가 핵심 요약을 작성하고 있어요. 원문과 그림은 먼저 확인할 수 있습니다.
+                    </span>
+                  </div>
+                  <SummarySkeleton />
+                </div>
+              ) : summaryError ? (
+                <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                  <div className="mb-1 font-medium">요약 생성에 실패했습니다.</div>
+                  <div className="mb-3 text-xs">{summaryError}</div>
+                  <button
+                    onClick={() =>
+                      loadSummary(loadedPaper.paper, loadedPaper.pdfUrl)
+                    }
+                    className="rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700"
+                  >
+                    요약 다시 시도
+                  </button>
+                </div>
+              ) : (
+                <>
+                  {/* 요약 언어 전환 (한/영) — 의학용어는 영어 원어가 더 명확한 경우가 있음 */}
+                  <div className="flex items-center justify-end gap-2">
+                    <span className="text-[12px] text-slate-500">요약 언어</span>
                 <div className="flex items-center gap-1">
                   {(
                     [
@@ -2290,12 +2374,14 @@ export default function Home() {
                 tone="emerald"
                 render={renderSummaryText}
               />
-              <SummarySection
-                title="핵심 메시지"
-                body={loadedPaper.summary.keyMessage}
-                tone="amber"
-                render={renderSummaryText}
-              />
+                  <SummarySection
+                    title="핵심 메시지"
+                    body={loadedPaper.summary.keyMessage}
+                    tone="amber"
+                    render={renderSummaryText}
+                  />
+                </>
+              )}
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center h-full text-zinc-400">
@@ -2976,9 +3062,7 @@ export default function Home() {
                       {geminiError}
                     </div>
                   ) : geminiLoading ? (
-                    <div className="text-center text-xs text-zinc-400 py-6 animate-pulse">
-                      이미지를 생성하는 중입니다... (수십 초 소요)
-                    </div>
+                    <ImageProgress elapsed={imageElapsed} compact />
                   ) : loadedPaper.geminiImage ? (
                     <div className="space-y-2">
                       {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -3118,6 +3202,86 @@ export default function Home() {
           </button>
         ))}
       </nav>
+    </div>
+  );
+}
+
+// 회전 스피너(작은 원형 로더). small=더 작게.
+function Spinner({ small = false }: { small?: boolean }) {
+  const s = small ? "h-3.5 w-3.5" : "h-4 w-4";
+  return (
+    <span
+      className={`inline-block ${s} shrink-0 animate-spin rounded-full border-2 border-zinc-300 border-t-blue-500`}
+      aria-hidden
+    />
+  );
+}
+
+// 이미지 생성 진행 표시 — 경과 시간 + 부드럽게 차오르는 진행바로 체감 대기시간을 낮춘다.
+// 실제 진행률은 알 수 없어 시간 기반으로 ~95%까지 점근(완료되면 부모가 언마운트).
+function ImageProgress({
+  elapsed,
+  compact = false,
+}: {
+  elapsed: number;
+  compact?: boolean;
+}) {
+  const pct = Math.min(95, Math.round(100 * (1 - Math.exp(-elapsed / 18))));
+  return (
+    <div
+      className={`rounded-xl border border-dashed border-zinc-200 bg-zinc-50 ${
+        compact ? "p-3" : "p-5"
+      }`}
+    >
+      <div className="mb-2 flex items-center gap-2 text-sm text-zinc-500">
+        <Spinner />
+        <span>핵심 내용을 한 장의 그림으로 그리는 중…</span>
+        <span className="ml-auto tabular-nums text-xs text-zinc-400">
+          {elapsed}초
+        </span>
+      </div>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-200">
+        <div
+          className="h-full rounded-full bg-blue-500 transition-[width] duration-300 ease-out"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      {!compact && (
+        <p className="mt-2 text-[11px] text-zinc-400">
+          고품질 이미지(Gemini 3 Pro)는 수십 초가 걸릴 수 있어요. 잠시만 기다려 주세요.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// 요약 생성 중 자리표시자(스켈레톤) — 핵심 결과 카드 + 본문 섹션 형태를 흉내낸다.
+function SummarySkeleton() {
+  return (
+    <div className="space-y-4" aria-hidden>
+      <div className="rounded-xl border border-blue-200/60 bg-blue-50/40 p-4">
+        <div className="mb-3 h-4 w-24 animate-pulse rounded bg-blue-200/60" />
+        <div className="space-y-2">
+          {[0, 1].map((i) => (
+            <div
+              key={i}
+              className="rounded-lg border border-l-4 border-slate-200 border-l-blue-300 bg-white p-3"
+            >
+              <div className="mb-2 h-3.5 w-3/4 animate-pulse rounded bg-slate-200" />
+              <div className="h-3 w-11/12 animate-pulse rounded bg-slate-100" />
+            </div>
+          ))}
+        </div>
+      </div>
+      {[0, 1, 2].map((i) => (
+        <div key={i} className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="mb-2 h-4 w-20 animate-pulse rounded bg-slate-200" />
+          <div className="space-y-1.5">
+            <div className="h-3 w-full animate-pulse rounded bg-slate-100" />
+            <div className="h-3 w-5/6 animate-pulse rounded bg-slate-100" />
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
