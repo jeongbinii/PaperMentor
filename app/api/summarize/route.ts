@@ -41,6 +41,10 @@ const SYSTEM_PROMPT = `당신은 의학 논문 학습을 돕는 한국어 AI 튜
   · 긍정 주장이면 "얼마나"인지 — 효과크기·CI·유의성 (예: "SMD -0.65, 95% CI -0.90~-0.40 → 중등도 효과, 유의함")
   · 애매·부정 주장이면 "왜"인지 — 작은 효과크기·CI가 귀무값(1 또는 0) 포함·연구 간 상충 등 (예: "효과크기 작고 95% CI가 0을 포함하여 유의하지 않음")
 - abstract의 주장을 우선으로 잡되, 본문 발췌(Methods/Results)로 수치를 보강합니다. 본문에 정량 수치가 없으면 evidence에 "본문에 정량 수치 없음"이라고 적습니다.
+- [풀어쓰기 — 중요] claim과 evidence는 "그 항목만 따로 읽어도" 초심자가 이해되도록 씁니다. 낯선 동물모델·약어·측정지표·시점·전문용어가 나오면 그 자리에서 짧은 괄호·삽입구로 뜻을 덧붙여 자립적인 문장으로 만듭니다.
+  · 예: "산소유발망막병증(OIR — 갓 태어난 쥐를 고농도 산소에 뒀다가 정상 산소로 되돌려 허혈성 망막병증을 재현하는 표준 동물모델)", "P17(생후 17일)", "유리체액(안구 속을 채운 젤 형태의 액체)", "상향 조절(발현량이 늘어남)".
+  · 뜻풀이는 널리 알려진 표준 배경지식만 사용합니다. 이 논문의 결과·수치·결론을 새로 지어내지 마십시오(수치가 본문에 없으면 "본문에 구체적 수치 없음"이라고 적습니다).
+  · 뜻풀이는 핵심 용어에만, 한 구절 수준으로 짧게 답니다. 문장이 장황해지지 않게 합니다.
 - 본문에 없는 수치를 만들지 마십시오.
 - source: 이 claim의 직접적 근거가 된 원문 문장을, 제공된 초록·본문에서 "있는 그대로(verbatim) 한 글자도 바꾸지 말고" 복사합니다.
   · 원문의 언어(주로 영어) 그대로. 한국어로 번역하지 마십시오.
@@ -52,8 +56,8 @@ const SYSTEM_PROMPT = `당신은 의학 논문 학습을 돕는 한국어 AI 튜
 {
   "keyFindings": [
     {
-      "claim": "abstract 기반 핵심 결과·쟁점 (의학적 평문 한 문장)",
-      "evidence": "그 주장을 뒷받침하는 본문 수치 + 해석 (얼마나/왜)",
+      "claim": "핵심 결과·쟁점 (의학적 평문 한 문장, 낯선 용어는 짧게 풀어서)",
+      "evidence": "주장을 뒷받침하는 본문 수치 + 해석 (얼마나/왜). 모델·약어·시점은 뜻을 덧붙여 그 항목만 읽어도 이해되게",
       "source": "이 결과의 근거가 된 원문 문장을 원어 그대로 복사 (없으면 빈 문자열)"
     }
   ],
@@ -63,6 +67,18 @@ const SYSTEM_PROMPT = `당신은 의학 논문 학습을 돕는 한국어 AI 튜
   "conclusion": "연구 결론. 저자가 본문에 명시한 결론을 인용·재진술. 본인 해석·일반화 추가 금지.",
   "keyMessage": "결론과 중복되지 않도록, 의대생이 이 논문 한 줄로 기억할 take-home 1~2문장. 결론이 '무엇이 밝혀졌나'라면 핵심 메시지는 '그래서 학습자가 어떻게 받아들여야 하나."
 }`;
+
+// 영어 요약 모드: 한국어로 쓰인 위 규칙을 그대로 따르되 "출력만" 영어로.
+// (프롬프트를 한/영 두 벌로 복제하지 않고 언어 스위치만 얹는다.)
+const EN_OVERRIDE = `[OUTPUT LANGUAGE — HIGHEST PRIORITY OVERRIDE]
+Produce every output field value in ENGLISH. The rules below are written in Korean and describe WHAT to produce, but your OUTPUT must be natural, clear English for medical students.
+- Use standard English medical terminology; do not insert Korean. For an uncommon term, add a short plain-English definition in parentheses (instead of a Korean gloss).
+- Wherever a rule tells you to write a Korean placeholder such as "본문에 명시되어 있지 않습니다.", write "Not specified in the text." instead.
+- keyFindings.source must remain the verbatim original-paper sentence (usually English) — never translate it.`;
+
+function systemFor(lang: unknown): string {
+  return lang === "en" ? `${EN_OVERRIDE}\n\n${SYSTEM_PROMPT}` : SYSTEM_PROMPT;
+}
 
 function tryParse(s: string): unknown | undefined {
   try {
@@ -144,7 +160,7 @@ function extractJson(text: string): StructuredSummary {
 
 export async function POST(request: Request) {
   try {
-    const { title, abstract, fullText } = await request.json();
+    const { title, abstract, fullText, lang } = await request.json();
 
     if (!abstract || typeof abstract !== "string") {
       return NextResponse.json(
@@ -166,7 +182,7 @@ export async function POST(request: Request) {
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 5120,
-      system: SYSTEM_PROMPT,
+      system: systemFor(lang),
       messages: [{ role: "user", content: userContent }],
     });
 

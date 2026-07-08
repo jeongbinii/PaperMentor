@@ -4,6 +4,16 @@ import { useState, useEffect, useRef, type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import ReadingGuide from "./components/ReadingGuide";
 import FeatureTip from "./components/FeatureTip";
+import Onboarding from "./components/Onboarding";
+import AuthStatus from "./components/AuthStatus";
+import { useUser } from "./lib/useUser";
+import {
+  saveAnalysis,
+  isBookmarked,
+  addBookmark,
+  removeBookmark,
+} from "./lib/db";
+import { sniffPdfIdentifier } from "./lib/pdfSniff";
 
 // react-pdf는 브라우저 전용(pdf.js) → SSR 비활성화로 클라이언트에서만 로드
 const PdfViewer = dynamic(() => import("./components/PdfViewer"), {
@@ -14,23 +24,46 @@ const PdfViewer = dynamic(() => import("./components/PdfViewer"), {
 });
 
 const SOURCE_TIP_KEY = "pm_source_tip_seen";
-const WELCOME_KEY = "pm_welcome_seen";
+// 온보딩 개편(단계별 안내) — 키를 올려 기존 이용자에게도 한 번 다시 노출
+const WELCOME_KEY = "pm_onboarding_v2";
 const FONT_SCALE_KEY = "pm_font_scale";
 // 글자 크기(루트 폰트) 단계 — rem 기반 텍스트가 함께 커짐
 const FONT_MIN = 14;
-const FONT_MAX = 21;
-const FONT_DEFAULT = 16;
+const FONT_MAX = 22;
+// 가독성 개선(교수 자문): 기본 글자 크기를 키움. rem 기반 본문이 함께 커진다.
+const FONT_DEFAULT = 17;
 
 // 우측 기능 패널 전체 마스터 스위치. 개별 탭은 위 탭 배열에서 가감한다.
 // (시각화 탭은 중앙으로 이동, 신뢰도 탭은 일시 비활성화 — 렌더 블록은 보존)
 const SHOW_RIGHT_PANEL = true;
+
+// 시각화 요약 이미지에서 선택 가능한 모델/품질. value = "provider|model|quality".
+// Gemini는 한글 라벨, GPT(gpt-image-1)는 영어 라벨(한글 렌더 깨짐). GPT는 품질 등급으로 버전 조절.
+const IMAGE_MODEL_OPTIONS: { v: string; label: string }[] = [
+  { v: "gemini|gemini-3.1-flash-lite-image|", label: "Gemini 3.1 Flash Lite · 빠름 (추천)" },
+  { v: "gemini|gemini-3-pro-image|", label: "Gemini 3 Pro · 고품질 (느림)" },
+  { v: "openai|gpt-image-1|high", label: "GPT Image · 고품질 (영어)" },
+  { v: "openai|gpt-image-1|medium", label: "GPT Image · 표준 (영어)" },
+];
+
+// 요약 도착 전(Phase 1)에 논문을 먼저 렌더링하기 위한 빈 요약 자리표시자.
+const EMPTY_SUMMARY: StructuredSummary = {
+  keyFindings: [],
+  background: "",
+  methods: "",
+  results: "",
+  conclusion: "",
+  keyMessage: "",
+};
 
 type ChatMessage = {
   role: "user" | "assistant";
   text: string;
 };
 
-type RightTab = "guide" | "background" | "translate" | "stats" | "qa" | "reliability" | "quiz" | "visualize";
+type RightTab = "guide" | "background" | "translate" | "stats" | "qa" | "reliability" | "quiz" | "visualize" | "slides";
+
+type Figure = { label: string; caption: string; srcs: string[] };
 
 type PubMedPaper = {
   pmid: string;
@@ -41,6 +74,8 @@ type PubMedPaper = {
   pubdate: string;
   doi: string | null;
   fullText?: string;
+  bodyText?: string;
+  figures?: Figure[];
 };
 
 type KeyFinding = {
@@ -327,6 +362,64 @@ function renderRich(
   return <>{nodes}</>;
 }
 
+type CaretDoc = {
+  caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  caretPositionFromPoint?: (
+    x: number,
+    y: number,
+  ) => { offsetNode: Node; offset: number } | null;
+};
+
+// 화면 좌표(x,y)에 있는 '단어'(공백·구두점 사이 토큰)를 찾아 해설 대상으로 반환.
+// 모바일 탭용 — 드래그 선택 대신 손가락으로 짚은 단어를 잡는다. data-explain 밖이면 null.
+function wordAtPoint(
+  x: number,
+  y: number,
+): { term: string; rect: DOMRect; block: Element | null } | null {
+  const doc = document as unknown as CaretDoc;
+  let node: Node | null = null;
+  let offset = 0;
+  if (doc.caretRangeFromPoint) {
+    const r = doc.caretRangeFromPoint(x, y);
+    if (r) {
+      node = r.startContainer;
+      offset = r.startOffset;
+    }
+  } else if (doc.caretPositionFromPoint) {
+    const p = doc.caretPositionFromPoint(x, y);
+    if (p) {
+      node = p.offsetNode;
+      offset = p.offset;
+    }
+  }
+  if (!node || node.nodeType !== Node.TEXT_NODE) return null;
+  const el = node.parentElement;
+  if (!el || !el.closest("[data-explain]")) return null;
+  const text = node.textContent ?? "";
+  if (!text) return null;
+  const isWord = (ch: string | undefined) =>
+    !!ch && !/[\s.,;:!?()[\]{}"“”'·…]/.test(ch);
+  let s = Math.min(Math.max(offset, 0), text.length);
+  let e = s;
+  // caret가 단어 끝 경계에 걸리면 왼쪽 단어를 잡는다
+  if (!isWord(text[s]) && isWord(text[s - 1])) {
+    s -= 1;
+    e = s;
+  }
+  while (s > 0 && isWord(text[s - 1])) s -= 1;
+  while (e < text.length && isWord(text[e])) e += 1;
+  const term = text.slice(s, e).trim();
+  if (!term) return null;
+  const range = document.createRange();
+  range.setStart(node, s);
+  range.setEnd(node, e);
+  const rect = range.getBoundingClientRect();
+  const block = el.closest(
+    "[data-explain] p, [data-explain] li, [data-explain] article",
+  );
+  return { term, rect, block };
+}
+
 export default function Home() {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<RightTab>("guide");
@@ -362,11 +455,21 @@ export default function Home() {
 
   const [paperLoading, setPaperLoading] = useState(false);
   const [paperError, setPaperError] = useState<string | null>(null);
+
+  // 로그인 사용자 + 북마크 상태(로그인 시에만 저장/북마크 UI 노출)
+  const { user } = useUser();
+  const [bookmarked, setBookmarked] = useState(false);
+  const [bookmarkBusy, setBookmarkBusy] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
 
   // 3분할 패널 너비 (px) — 가운데(main)는 flex-1로 나머지 차지
   const [leftW, setLeftW] = useState(360);
   const [rightW, setRightW] = useState(440);
+
+  // 모바일(lg 미만): 한 번에 한 패널만 표시 — 하단 탭으로 전환
+  const [mobileView, setMobileView] = useState<
+    "original" | "summary" | "tools"
+  >("original");
   const resizingRef = useRef<null | "left" | "right">(null);
   const leftWRef = useRef(leftW);
   const rightWRef = useRef(rightW);
@@ -474,44 +577,74 @@ export default function Home() {
     }
   }, [fontScale]);
 
-  // 용어 해설 모드: data-explain 영역에서 텍스트 선택 시 해당 부분 해설 생성
+  // 내 서재 등에서 ?q=PMID/DOI 로 진입하면 자동으로 그 논문을 분석
+  const autoRanRef = useRef(false);
+  useEffect(() => {
+    if (autoRanRef.current) return;
+    autoRanRef.current = true;
+    const q = new URLSearchParams(window.location.search).get("q");
+    // PDF 업로드본(pdf:파일명)은 서버에 원본이 없어 재분석 불가 → 자동실행하지 않음
+    if (q && !q.startsWith("pdf:")) {
+      setSearchQuery(q);
+      void handleAnalyzePaper(q);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 현재 논문 북마크 토글(로그인 시에만 버튼 노출)
+  async function toggleBookmark() {
+    if (!loadedPaper || bookmarkBusy) return;
+    setBookmarkBusy(true);
+    const p = loadedPaper.paper;
+    try {
+      if (bookmarked) {
+        const ok = await removeBookmark(p.pmid);
+        if (ok) setBookmarked(false);
+      } else {
+        const ok = await addBookmark({
+          pmid: p.pmid,
+          title: p.title,
+          journal: p.journal,
+          authors: p.authors,
+          doi: p.doi,
+          pubdate: p.pubdate,
+        });
+        if (ok) setBookmarked(true);
+      }
+    } finally {
+      setBookmarkBusy(false);
+    }
+  }
+
+  // 로그인 상태·현재 논문에 맞춰 북마크 여부 동기화
+  // (분석 직후뿐 아니라 로그인/로그아웃 전환·서재 진입 레이스에도 대응)
+  useEffect(() => {
+    if (!user || !loadedPaper) {
+      setBookmarked(false);
+      return;
+    }
+    let alive = true;
+    isBookmarked(loadedPaper.paper.pmid).then((v) => {
+      if (alive) setBookmarked(v);
+    });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, loadedPaper?.paper.pmid]);
+
+  // 용어 해설 모드: 데스크톱은 드래그 선택, 모바일은 탭(또는 롱프레스 선택)으로 해설 생성
   useEffect(() => {
     if (!explainMode) return;
-    async function onMouseUp() {
-      const sel = window.getSelection();
-      if (!sel || sel.isCollapsed) {
-        setExplainPopup(null); // 빈 클릭이면 팝업 닫기
-        return;
-      }
-      const term = sel.toString().trim();
-      if (term.length < 2 || term.length > 120) return;
-      const node = sel.anchorNode;
-      const el = (node instanceof Element ? node : node?.parentElement) ?? null;
-      const region = el?.closest("[data-explain]");
-      if (!region) return;
-      const rect = sel.getRangeAt(0).getBoundingClientRect();
-      const block = el?.closest(
-        "[data-explain] p, [data-explain] li, [data-explain] article",
-      );
-      const context = (block?.textContent || region.textContent || "").slice(
-        0,
-        600,
-      );
-      const x = Math.min(
-        Math.max(rect.left + rect.width / 2, 160),
-        window.innerWidth - 160,
-      );
-      const y = rect.bottom + 8;
-      setExplainPopup({ x, y, term, loading: true, text: "", error: "" });
+
+    async function trigger(term: string, context: string, cx: number, cy: number) {
+      const x = Math.min(Math.max(cx, 160), window.innerWidth - 160);
+      setExplainPopup({ x, y: cy, term, loading: true, text: "", error: "" });
       try {
         const res = await fetch("/api/explain-term", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            term,
-            context,
-            title: loadedPaper?.paper.title,
-          }),
+          body: JSON.stringify({ term, context, title: loadedPaper?.paper.title }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error ?? "해설 생성에 실패했습니다.");
@@ -527,8 +660,80 @@ export default function Home() {
         );
       }
     }
+
+    // 현재 선택(드래그/롱프레스)이 유효하면 해설 대상으로 삼는다. 처리했으면 true.
+    function fromSelection(): boolean {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) return false;
+      const term = sel.toString().trim();
+      if (term.length < 2 || term.length > 120) return false;
+      const node = sel.anchorNode;
+      const el = (node instanceof Element ? node : node?.parentElement) ?? null;
+      const region = el?.closest("[data-explain]");
+      if (!region) return false;
+      const rect = sel.getRangeAt(0).getBoundingClientRect();
+      const block = el?.closest(
+        "[data-explain] p, [data-explain] li, [data-explain] article",
+      );
+      const context = (block?.textContent || region.textContent || "").slice(0, 600);
+      trigger(term, context, rect.left + rect.width / 2, rect.bottom + 8);
+      return true;
+    }
+
+    let lastTouch = 0;
+
+    function onMouseUp() {
+      if (Date.now() - lastTouch < 800) return; // 터치 후 합성되는 마우스 이벤트 무시
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) {
+        setExplainPopup(null); // 빈 클릭이면 팝업 닫기
+        return;
+      }
+      fromSelection();
+    }
+
+    // 탭 vs 스크롤 구분용 시작 좌표
+    let sx = 0;
+    let sy = 0;
+    let moved = false;
+    function onTouchStart(e: TouchEvent) {
+      const t = e.touches[0];
+      if (!t) return;
+      sx = t.clientX;
+      sy = t.clientY;
+      moved = false;
+    }
+    function onTouchMove(e: TouchEvent) {
+      const t = e.touches[0];
+      if (!t) return;
+      if (Math.abs(t.clientX - sx) > 10 || Math.abs(t.clientY - sy) > 10) moved = true;
+    }
+    function onTouchEnd(e: TouchEvent) {
+      lastTouch = Date.now();
+      if (moved) return; // 스크롤 제스처는 무시
+      if (fromSelection()) return; // 롱프레스로 구절을 선택했으면 그걸 사용
+      const t = e.changedTouches[0];
+      if (!t) return;
+      const hit = wordAtPoint(t.clientX, t.clientY); // 손가락으로 짚은 단어
+      if (!hit) {
+        setExplainPopup(null);
+        return;
+      }
+      if (hit.term.length < 2 || hit.term.length > 120) return;
+      const context = (hit.block?.textContent || "").slice(0, 600);
+      trigger(hit.term, context, hit.rect.left + hit.rect.width / 2, hit.rect.bottom + 8);
+    }
+
     document.addEventListener("mouseup", onMouseUp);
-    return () => document.removeEventListener("mouseup", onMouseUp);
+    document.addEventListener("touchstart", onTouchStart, { passive: true });
+    document.addEventListener("touchmove", onTouchMove, { passive: true });
+    document.addEventListener("touchend", onTouchEnd);
+    return () => {
+      document.removeEventListener("mouseup", onMouseUp);
+      document.removeEventListener("touchstart", onTouchStart);
+      document.removeEventListener("touchmove", onTouchMove);
+      document.removeEventListener("touchend", onTouchEnd);
+    };
   }, [explainMode, loadedPaper]);
 
   const [chatInput, setChatInput] = useState("");
@@ -556,53 +761,136 @@ export default function Home() {
   const [guideError, setGuideError] = useState<string | null>(null);
   const [geminiLoading, setGeminiLoading] = useState(false);
   const [geminiError, setGeminiError] = useState<string | null>(null);
+  // 이미지 생성 경과 시간(초) — 진행바·경과표시로 체감 대기시간을 낮춘다.
+  const [imageElapsed, setImageElapsed] = useState(0);
+  // 요약(Phase 2) 진행/실패 상태 — 논문은 먼저 뜨고 요약만 스켈레톤으로 채운다.
+  const [summaryPending, setSummaryPending] = useState(false);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
   const [imageProvider, setImageProvider] = useState<
     "gemini" | "openai" | "flux" | "ideogram"
   >("gemini");
+  // 선택된 이미지 모델/품질(드롭다운). provider와 함께 백엔드로 전달.
+  const [imageModel, setImageModel] = useState<string>("gemini-3.1-flash-lite-image");
+  const [imageQuality, setImageQuality] = useState<string>("");
 
-  // 논문(메타+초록)을 받아 요약 생성 후 상태에 적재 — PMID/DOI 경로와 PDF 경로가 공유
-  async function summarizeAndLoad(paper: PubMedPaper, pdfUrl?: string) {
-    const summaryRes = await fetch("/api/summarize", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        title: paper.title,
-        abstract: paper.abstract,
-        fullText: paper.fullText,
-      }),
-    });
-    const summaryData = await summaryRes.json();
-    if (!summaryRes.ok) {
-      throw new Error(summaryData.error ?? "요약 생성에 실패했습니다.");
+  // 이미지 생성 중에만 1초 단위로 경과 시간을 올린다(진행바·"n초 경과" 표시용).
+  useEffect(() => {
+    if (!geminiLoading) {
+      setImageElapsed(0);
+      return;
     }
+    const started = Date.now();
+    const id = setInterval(
+      () => setImageElapsed(Math.floor((Date.now() - started) / 1000)),
+      250,
+    );
+    return () => clearInterval(id);
+  }, [geminiLoading]);
 
-    const loaded: LoadedPaper = {
-      paper,
-      summary: summaryData.summary as StructuredSummary,
-      pdfUrl,
-    };
-    setLoadedPaper(loaded);
+  // 요약 언어(한/영 토글). 의학용어는 영어 원어가 더 명확한 경우가 있어 선택 가능.
+  const [summaryLang, setSummaryLang] = useState<"ko" | "en">("ko");
+  const [summaryLangLoading, setSummaryLangLoading] = useState(false);
+
+  // 발표 슬라이드(.pptx) 다운로드 상태
+  const [slidesMode, setSlidesMode] = useState<null | "compose" | "llm">(null);
+  const [slidesError, setSlidesError] = useState<string | null>(null);
+  const [slidesRequirements, setSlidesRequirements] = useState("");
+  const [slidesResult, setSlidesResult] = useState<
+    { mode: "compose" | "llm"; slides: number; figures: number } | null
+  >(null);
+
+  // 논문(메타+초록)을 받아 화면에 적재 — PMID/DOI 경로와 PDF 경로가 공유.
+  // 2단계로 나눠 체감 대기시간을 낮춘다:
+  //   Phase 1 — 논문 메타·원문·그림을 즉시 렌더(요약은 스켈레톤 자리표시자).
+  //   Phase 2 — 요약이 도착하면 스켈레톤을 실제 내용으로 채우고 후속 도구를 프리페치.
+  // "빈 화면 → 한꺼번에 등장"이 아니라 원문이 먼저 뜨고 요약이 흘러들어오게 한다.
+  async function summarizeAndLoad(paper: PubMedPaper, pdfUrl?: string) {
+    // ── Phase 1: 논문을 먼저 렌더(요약은 자리표시자) ──────────────────
+    const pending: LoadedPaper = { paper, summary: EMPTY_SUMMARY, pdfUrl };
+    setLoadedPaper(pending);
+    setSummaryPending(true);
+    setSummaryError(null);
+    setPaperLoading(false); // 전체 로더 해제 → 좌측 원문·그림 + 요약 스켈레톤이 곧바로 보임
+    setMobileView("summary"); // 모바일: 분석 직후 핵심요약 패널로 전환
     setChatHistory([]);
     setQuizAnswers({});
     setActiveTab("guide");
     setSearchOpen(false);
-    setOriginalView(pdfUrl ? "pdf" : "text");
+    // PMC 전문(bodyText+그림)이 있으면 가독성이 더 좋은 텍스트 뷰를 기본으로.
+    // 없을 때만 업로드한 PDF를 기본으로 보여준다.
+    setOriginalView(paper.bodyText ? "text" : pdfUrl ? "pdf" : "text");
     setRecentPapers((prev) => {
       const without = prev.filter((p) => p.paper.pmid !== paper.pmid);
-      return [loaded, ...without].slice(0, 10);
+      return [pending, ...without].slice(0, 10);
     });
 
-    // 시각화 요약 이미지 자동 생성 (Gemini) — 사용자 요청 없이 분석 직후 생성
-    if (!loaded.geminiImage) {
-      handleGenerateImage(loaded, "gemini");
-    }
-    // 의학용어 사전 자동 생성 — 요약·원문 인라인 호버에 사용
-    if (!loaded.translation) {
-      handleTranslate(loaded);
+    // ── Phase 2: 요약 생성 후 적재 ────────────────────────────────
+    await loadSummary(paper, pdfUrl);
+  }
+
+  // 현재 논문의 요약을 생성해 적재하고, 이미지·사전·읽기도구 프리페치를 시작한다.
+  // 최초 적재(summarizeAndLoad)와 "요약 다시 시도" 버튼이 공유한다.
+  async function loadSummary(paper: PubMedPaper, pdfUrl?: string) {
+    setSummaryPending(true);
+    setSummaryError(null);
+    let summary: StructuredSummary;
+    try {
+      const summaryRes = await fetch("/api/summarize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: paper.title,
+          abstract: paper.abstract,
+          fullText: paper.fullText,
+          lang: summaryLang,
+        }),
+      });
+      const summaryData = await summaryRes.json();
+      if (!summaryRes.ok) {
+        throw new Error(summaryData.error ?? "요약 생성에 실패했습니다.");
+      }
+      summary = summaryData.summary as StructuredSummary;
+    } catch (e) {
+      setSummaryError(
+        e instanceof Error ? e.message : "요약 생성에 실패했습니다.",
+      );
+      setSummaryPending(false);
+      return;
     }
 
+    const loaded: LoadedPaper = { paper, summary, pdfUrl };
+    // 사용자가 그새 다른 논문을 열었으면 덮어쓰지 않는다(경쟁 조건 가드).
+    setLoadedPaper((prev) =>
+      prev && prev.paper.pmid === paper.pmid ? { ...prev, summary } : prev,
+    );
+    setRecentPapers((prev) =>
+      prev.map((p) => (p.paper.pmid === paper.pmid ? { ...p, summary } : p)),
+    );
+    setSummaryPending(false);
+    // 로그인 상태면 분석을 히스토리에 저장(실패해도 분석엔 영향 없음).
+    // 북마크 여부는 아래 [user, 논문] useEffect가 동기화한다.
+    void saveAnalysis(paper, summary);
+
+    // 시각화 요약 이미지 자동 생성 (Gemini) — 요약이 준비된 뒤 시작
+    handleGenerateImage(loaded, "gemini");
+    // 의학용어 사전 자동 생성 — 요약·원문 인라인 호버에 사용
+    handleTranslate(loaded);
+    // 우측 읽기 도구 미리 생성(프리페치) — 탭 클릭 후 대기 제거.
+    // 각 핸들러는 (target.X || loading) 가드 + pmid 가드가 있어 중복/경쟁에 안전.
+    // 공용 계정 버스트 완화: 기본 탭(가이드)만 즉시, 나머지는 짧은 시차로 순차 실행.
+    handleGuide(loaded);
+    const prefetchRest = [
+      () => handleStatistics(loaded),
+      () => handleBackground(loaded),
+      () => handleReliability(loaded),
+      () => handleQuiz(loaded),
+    ];
+    prefetchRest.forEach((fn, i) => {
+      setTimeout(fn, 300 + i * 350 + Math.floor(Math.random() * 150));
+    });
+
     // 형광펜(원문 근거) 기능 첫 사용 안내 — source가 있는 결과가 있고, 아직 안 봤을 때 1회
-    const hasSource = loaded.summary.keyFindings?.some((f) => f.source);
+    const hasSource = summary.keyFindings?.some((f) => f.source);
     if (
       hasSource &&
       typeof window !== "undefined" &&
@@ -636,6 +924,38 @@ export default function Home() {
       // localStorage 불가 환경 무시
     }
     setShowWelcome(false);
+  }
+
+  // 요약 언어 전환 — 현재 논문을 선택 언어로 재요약(LLM 재실행)해 요약만 교체.
+  async function switchSummaryLang(lang: "ko" | "en") {
+    if (!loadedPaper || summaryLangLoading || lang === summaryLang) return;
+    const prevLang = summaryLang;
+    setSummaryLang(lang);
+    setSummaryLangLoading(true);
+    try {
+      const res = await fetch("/api/summarize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: loadedPaper.paper.title,
+          abstract: loadedPaper.paper.abstract,
+          fullText: loadedPaper.paper.fullText,
+          lang,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.summary) {
+        setLoadedPaper((prev) =>
+          prev ? { ...prev, summary: data.summary } : prev,
+        );
+      } else {
+        setSummaryLang(prevLang); // 실패 시 토글 원복(기존 요약 유지)
+      }
+    } catch {
+      setSummaryLang(prevLang);
+    } finally {
+      setSummaryLangLoading(false);
+    }
   }
 
   async function handleAnalyzePaper(queryOverride?: string) {
@@ -674,13 +994,64 @@ export default function Home() {
       form.append("file", file);
 
       const pdfRes = await fetch("/api/pdf", { method: "POST", body: form });
-      const pdfData = await pdfRes.json();
       if (!pdfRes.ok) {
-        throw new Error(pdfData.error ?? "PDF를 분석하지 못했습니다.");
+        // 플랫폼(Vercel)이 함수 도달 전에 막으면 JSON이 아닌 평문(413 "Request Entity
+        // Too Large")을 준다 → .json() 파싱이 터지지 않게 상태코드로 먼저 분기.
+        let msg = "PDF를 분석하지 못했습니다.";
+        if (pdfRes.status === 413) {
+          msg =
+            "PDF 용량이 업로드 한도(약 4.5MB)를 초과했습니다. 같은 논문을 PubMed ID·DOI·PMCID로 검색하면 전문·그림을 받아올 수 있어요.";
+        } else {
+          try {
+            msg = (await pdfRes.json()).error ?? msg;
+          } catch {
+            // 평문 응답 등 JSON 아님 — 기본 메시지 유지
+          }
+        }
+        throw new Error(msg);
       }
+      const pdfData = await pdfRes.json();
       // 업로드한 PDF를 좌측 원본에 그대로 띄우기 위해 object URL 생성
       const pdfUrl = URL.createObjectURL(file);
       await summarizeAndLoad(pdfData.paper as PubMedPaper, pdfUrl);
+    } catch (e) {
+      setPaperError(e instanceof Error ? e.message : "알 수 없는 오류");
+    } finally {
+      setPaperLoading(false);
+    }
+  }
+
+  // Vercel 서버리스 함수 요청 본문 한도(4.5MB) 아래로 여유를 둔 업로드 상한
+  const MAX_PDF_UPLOAD_BYTES = 4.3 * 1024 * 1024;
+
+  // 큰 PDF: 서버로 못 보냄 → 앞 페이지에서 식별자(DOI·PMCID·PMID)를 뽑아 식별자→PMC 경로로.
+  async function handleLargePdf(file: File) {
+    if (paperLoading) return;
+    setPaperLoading(true);
+    setPaperError(null);
+    try {
+      const id = await sniffPdfIdentifier(file);
+      if (!id) {
+        const mb = (file.size / (1024 * 1024)).toFixed(1);
+        throw new Error(
+          `이 PDF(${mb}MB)는 업로드 한도(약 4.5MB)를 넘고, 첫 페이지에서 DOI·PMCID도 찾지 못했습니다. 위 검색창에 PubMed ID·DOI·PMCID를 직접 입력해 주세요.`,
+        );
+      }
+      const pubmedRes = await fetch("/api/pubmed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: id }),
+      });
+      const data = await pubmedRes.json();
+      if (!pubmedRes.ok) {
+        throw new Error(
+          data.error ??
+            `PDF에서 식별자(${id})를 찾았지만 해당 논문을 불러오지 못했습니다.`,
+        );
+      }
+      // 업로드한 PDF를 좌측에 그대로 띄우되(objectURL), 내용은 식별자→PMC 결과 사용.
+      const pdfUrl = URL.createObjectURL(file);
+      await summarizeAndLoad(data as PubMedPaper, pdfUrl);
     } catch (e) {
       setPaperError(e instanceof Error ? e.message : "알 수 없는 오류");
     } finally {
@@ -694,6 +1065,11 @@ export default function Home() {
       file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
     if (!isPdf) {
       setPaperError("PDF 파일만 업로드할 수 있습니다.");
+      return;
+    }
+    if (file.size > MAX_PDF_UPLOAD_BYTES) {
+      // 큰 PDF는 앞 페이지 식별자로 PMC 경로 시도(업로드 회피)
+      void handleLargePdf(file);
       return;
     }
     handlePdfUpload(file);
@@ -935,6 +1311,9 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           provider: providerOverride ?? imageProvider,
+          // providerOverride(자동생성 등)는 기본 모델 사용 → model/quality 빈 값
+          model: providerOverride ? "" : imageModel,
+          quality: providerOverride ? "" : imageQuality,
           title: target.paper.title,
           keyFindings: target.summary.keyFindings,
           methods: target.summary.methods,
@@ -959,6 +1338,58 @@ export default function Home() {
       setGeminiError(e instanceof Error ? e.message : "알 수 없는 오류");
     } finally {
       setGeminiLoading(false);
+    }
+  }
+
+  // 발표 슬라이드(.pptx) 생성·다운로드. compose=요약 그대로 조립, llm=AI 재구성.
+  async function downloadSlides(mode: "compose" | "llm") {
+    if (!loadedPaper || slidesMode || summaryPending) return;
+    setSlidesMode(mode);
+    setSlidesError(null);
+    setSlidesResult(null);
+    try {
+      const res = await fetch("/api/slides", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode,
+          paper: loadedPaper.paper,
+          summary: loadedPaper.summary,
+          statistics: loadedPaper.statistics ?? null,
+          background: loadedPaper.background ?? null,
+          // 추가 요구사항은 AI 재구성(llm) 모드에만 반영
+          requirements: mode === "llm" ? slidesRequirements.trim() : undefined,
+        }),
+      });
+      if (!res.ok) {
+        let msg = "슬라이드 생성에 실패했습니다.";
+        try {
+          msg = (await res.json()).error ?? msg;
+        } catch {
+          // 본문 파싱 실패 무시
+        }
+        throw new Error(msg);
+      }
+      const slideCount = Number(res.headers.get("X-Slide-Count")) || 0;
+      const figCount = Number(res.headers.get("X-Figure-Count")) || 0;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const cd = res.headers.get("Content-Disposition") ?? "";
+      const m = /filename\*=UTF-8''([^;]+)/.exec(cd);
+      a.download = m
+        ? decodeURIComponent(m[1])
+        : `발표슬라이드_${mode === "llm" ? "AI재구성" : "요약조립"}.pptx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setSlidesResult({ mode, slides: slideCount, figures: figCount });
+    } catch (e) {
+      setSlidesError(e instanceof Error ? e.message : "알 수 없는 오류");
+    } finally {
+      setSlidesMode(null);
     }
   }
 
@@ -1046,6 +1477,56 @@ export default function Home() {
     });
   }
 
+  // 전체 본문 렌더: @@FIG:n@@ 마커 위치에 논문 그림(이미지+캡션)을 끼워 넣는다.
+  function renderBodyWithFigures(text: string, figures: Figure[]) {
+    const parts = text.split(/@@FIG:(\d+)@@/);
+    const nodes: ReactNode[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      if (i % 2 === 0) {
+        const seg = parts[i];
+        if (seg.trim()) {
+          nodes.push(
+            <p
+              key={`t${i}`}
+              className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-700"
+            >
+              {renderOriginal(seg)}
+            </p>,
+          );
+        }
+      } else {
+        const fig = figures[Number(parts[i])];
+        if (fig && (fig.srcs.length > 0 || fig.caption)) {
+          nodes.push(
+            <figure key={`f${i}`} className="my-3 space-y-2">
+              {fig.srcs.map((src, k) => (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  key={k}
+                  src={src}
+                  alt={fig.label || "figure"}
+                  loading="lazy"
+                  className="w-full rounded-md border border-zinc-200"
+                />
+              ))}
+              {(fig.label || fig.caption) && (
+                <figcaption className="mt-1 text-[12.5px] leading-relaxed text-zinc-500">
+                  {fig.label && (
+                    <span className="font-semibold text-zinc-600">
+                      {fig.label}.{" "}
+                    </span>
+                  )}
+                  {fig.caption}
+                </figcaption>
+              )}
+            </figure>,
+          );
+        }
+      }
+    }
+    return nodes;
+  }
+
   // 중앙 요약: 용어 호버만 렌더
   function renderSummaryText(text: string) {
     if (!text) return text;
@@ -1119,47 +1600,7 @@ export default function Home() {
         </div>
       )}
       {showWelcome && (
-        <FeatureTip
-          title="PaperMentor 사용 안내"
-          badge="처음 오셨나요?"
-          onClose={closeWelcome}
-          onNeverShow={neverShowWelcome}
-        >
-          <p className="text-[13px] text-zinc-500">
-            의학 논문을 단계별로 읽고 이해하도록 돕는 도구입니다. 화면은 세 부분으로 나뉩니다.
-          </p>
-          <ul className="space-y-2 text-[13px]">
-            <li className="flex gap-2">
-              <span>📄</span>
-              <span>
-                <span className="font-semibold text-zinc-800">왼쪽 — 논문 올리기 / 원문</span>
-                <br />
-                위쪽에서 PubMed ID·DOI를 넣거나 PDF를 끌어다 놓으면 분석이 시작돼요. 분석 후엔 같은 자리에 원문이 표시됩니다.
-              </span>
-            </li>
-            <li className="flex gap-2">
-              <span>📊</span>
-              <span>
-                <span className="font-semibold text-zinc-800">가운데 — 시각화 요약 + 핵심 요약</span>
-                <br />
-                분석하면 핵심 내용을 한눈에 보는 시각화 요약 이미지가 자동으로 만들어지고, 그 아래에 핵심 결과·배경·방법·결론이 정리돼요. 핵심 결과를 누르면 왼쪽 원문에서 근거 문장이 형광펜으로 표시됩니다.
-              </span>
-            </li>
-            {SHOW_RIGHT_PANEL && (
-              <li className="flex gap-2">
-                <span>🧭</span>
-                <span>
-                  <span className="font-semibold text-zinc-800">오른쪽 — 읽기 도구 탭</span>
-                  <br />
-                  읽기 가이드 · 배경지식 · 통계 해석 · 퀴즈 · Q&A를 탭에서 볼 수 있어요.
-                </span>
-              </li>
-            )}
-          </ul>
-          <p className="text-[12px] text-zinc-400">
-            이 안내는 가운데 상단의 <span className="font-medium text-zinc-500">? 사용 안내</span> 버튼으로 언제든 다시 볼 수 있어요.
-          </p>
-        </FeatureTip>
+        <Onboarding onClose={closeWelcome} onNeverShow={neverShowWelcome} />
       )}
       {showSourceTip && (
         <FeatureTip
@@ -1220,14 +1661,15 @@ export default function Home() {
                 beta
               </span>
             </div>
-            <div className="text-[11px] tracking-tight text-slate-400">
+            <div className="hidden text-[11px] tracking-tight text-slate-400 sm:block">
               의학 논문 학습 지원 플랫폼
             </div>
           </div>
         </div>
 
-        {/* 글자 크기 조절 */}
-        <div className="ml-auto flex items-center gap-2">
+        {/* 우측: 글자 크기 조절 + 로그인 상태 */}
+        <div className="ml-auto flex items-center gap-3">
+          <div className="flex items-center gap-2">
           <span className="hidden text-[11px] text-slate-400 sm:inline">
             글자 크기
           </span>
@@ -1256,6 +1698,14 @@ export default function Home() {
               +
             </button>
           </div>
+          </div>
+          <a
+            href="/community"
+            className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-[12px] font-semibold text-blue-700 shadow-sm transition-colors hover:border-blue-300 hover:bg-blue-100"
+          >
+            이용후기
+          </a>
+          <AuthStatus />
         </div>
       </header>
 
@@ -1263,7 +1713,9 @@ export default function Home() {
       <div className="flex flex-1 min-h-0 overflow-hidden">
       <aside
         style={{ width: leftW }}
-        className="shrink-0 border-r border-slate-200 bg-slate-50 flex flex-col overflow-hidden min-h-0"
+        className={`shrink-0 border-r border-slate-200 bg-slate-50 flex flex-col overflow-hidden min-h-0 max-lg:!w-full max-lg:border-r-0 ${
+          mobileView === "original" ? "" : "max-lg:hidden"
+        }`}
       >
         {/* 접이식: 논문 검색 · 최근 분석 (논문 로드 시 접힘) */}
         <div className="shrink-0 border-b border-zinc-200">
@@ -1319,7 +1771,7 @@ export default function Home() {
                     handleAnalyzePaper();
                   }
                 }}
-                placeholder="PubMed ID 또는 DOI"
+                placeholder="PubMed ID · DOI · PMCID"
                 disabled={paperLoading}
                 className="w-full px-3 py-2 text-sm border border-zinc-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-zinc-100"
               />
@@ -1413,7 +1865,13 @@ export default function Home() {
                             setQuizAnswers({});
                             setActiveTab("guide");
                             setSearchOpen(false);
-                            setOriginalView(item.pdfUrl ? "pdf" : "text");
+                            setOriginalView(
+                              item.paper.bodyText
+                                ? "text"
+                                : item.pdfUrl
+                                  ? "pdf"
+                                  : "text",
+                            );
                             if (!item.geminiImage) {
                               handleGenerateImage(item, "gemini");
                             }
@@ -1520,9 +1978,14 @@ export default function Home() {
                       </div>
                     </div>
 
-                    {loadedPaper.pdfUrl && (
+                    {loadedPaper.pdfUrl && !loadedPaper.paper.bodyText && (
                       <p className="mt-2 rounded-md bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
                         텍스트 모드는 AI가 추출한 발췌본입니다. 정확한 원문·그림은 📄 PDF 모드로 보세요.
+                      </p>
+                    )}
+                    {loadedPaper.pdfUrl && loadedPaper.paper.bodyText && (
+                      <p className="mt-2 rounded-md bg-emerald-50 px-2 py-1 text-[11px] text-emerald-700">
+                        PMC 오픈액세스 전문을 불러왔습니다. 업로드한 PDF 원본은 📄 PDF 모드에서 볼 수 있습니다.
                       </p>
                     )}
 
@@ -1537,10 +2000,22 @@ export default function Home() {
                       </p>
                     </div>
 
-                    {loadedPaper.paper.fullText ? (
+                    {loadedPaper.paper.bodyText ? (
+                      <div className="mt-4 border-t border-zinc-100 pt-4">
+                        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                          본문 (Full text)
+                        </div>
+                        <div className="space-y-1">
+                          {renderBodyWithFigures(
+                            loadedPaper.paper.bodyText,
+                            loadedPaper.paper.figures ?? [],
+                          )}
+                        </div>
+                      </div>
+                    ) : loadedPaper.paper.fullText ? (
                       <div className="mt-4 border-t border-zinc-100 pt-4">
                         <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
-                          본문 발췌 (Full text)
+                          본문 핵심 발췌
                         </div>
                         <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-700">
                           {renderOriginal(loadedPaper.paper.fullText)}
@@ -1559,7 +2034,7 @@ export default function Home() {
             <div className="mt-8 px-6 text-center text-sm text-zinc-400">
               <p>논문 원본</p>
               <p className="mt-2 text-xs leading-relaxed">
-                위에서 PubMed ID·DOI로 검색하거나 PDF를 올리면
+                위에서 PubMed ID·DOI·PMCID로 검색하거나 PDF를 올리면
                 <br />
                 원문이 여기에 표시됩니다.
               </p>
@@ -1570,11 +2045,15 @@ export default function Home() {
 
       <div
         onMouseDown={() => startResize("left")}
-        className="w-1.5 shrink-0 cursor-col-resize bg-zinc-200 hover:bg-blue-400 active:bg-blue-500 transition-colors"
+        className="w-1.5 shrink-0 cursor-col-resize bg-zinc-200 hover:bg-blue-400 active:bg-blue-500 transition-colors max-lg:hidden"
         title="드래그하여 너비 조절"
       />
 
-      <main className="flex-1 min-w-0 flex flex-col bg-white overflow-hidden">
+      <main
+        className={`flex-1 min-w-0 flex flex-col bg-white overflow-hidden ${
+          mobileView === "summary" ? "" : "max-lg:hidden"
+        }`}
+      >
         <div className="p-6 border-b border-zinc-200">
           <div className="flex items-center justify-between gap-2">
             <h2 className="text-sm font-semibold text-zinc-500 uppercase tracking-wide">
@@ -1591,9 +2070,9 @@ export default function Home() {
                     ? "border-blue-600 bg-blue-600 text-white"
                     : "border-zinc-200 text-zinc-500 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-600"
                 }`}
-                title="켜면 요약·원문에서 모르는 부분을 드래그할 때 해설이 나옵니다"
+                title="켜면 모르는 단어를 탭(데스크톱은 드래그)할 때 해설이 나옵니다"
               >
-                💬 용어 해설 {explainMode ? "ON" : "OFF"}
+                용어 해설 {explainMode ? "ON" : "OFF"}
               </button>
               <button
                 onClick={() => setShowWelcome(true)}
@@ -1606,9 +2085,37 @@ export default function Home() {
           </div>
           {loadedPaper && (
             <div className="mt-2">
-              <h1 className="text-lg font-semibold text-zinc-900 leading-snug">
-                {loadedPaper.paper.title}
-              </h1>
+              <div className="flex items-start justify-between gap-3">
+                <h1 className="text-lg font-semibold text-zinc-900 leading-snug">
+                  {loadedPaper.paper.title}
+                </h1>
+                {user && (
+                  <button
+                    onClick={toggleBookmark}
+                    disabled={bookmarkBusy}
+                    title={bookmarked ? "내 서재에서 빼기" : "내 서재에 저장"}
+                    className={`shrink-0 inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] font-medium transition-colors disabled:opacity-50 ${
+                      bookmarked
+                        ? "border-blue-200 bg-blue-50 text-blue-600"
+                        : "border-slate-200 bg-white text-slate-500 hover:border-blue-300 hover:text-blue-600"
+                    }`}
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      className="h-3.5 w-3.5"
+                      fill={bookmarked ? "currentColor" : "none"}
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    >
+                      <path
+                        d="M6 4h12a1 1 0 0 1 1 1v15l-7-4-7 4V5a1 1 0 0 1 1-1z"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    {bookmarked ? "저장됨" : "저장"}
+                  </button>
+                )}
+              </div>
               <p className="text-xs text-zinc-500 mt-1">
                 {loadedPaper.paper.journal}
                 {loadedPaper.paper.pubdate &&
@@ -1628,14 +2135,13 @@ export default function Home() {
         <div className="flex-1 overflow-y-auto bg-slate-50/60 p-6" data-explain>
           {explainMode && loadedPaper && (
             <div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700">
-              💬 용어 해설 모드 — 요약이나 왼쪽 원문에서 <b>모르는 단어·구절을 드래그</b>하면 그 부분 해설이 떠요.
+              용어 해설 모드 — 요약이나 왼쪽 원문에서 <b>모르는 단어를 탭</b>하면 (데스크톱은 구절을 드래그해도) 해설이 떠요.
             </div>
           )}
           {paperLoading ? (
             <div className="flex flex-col items-center justify-center h-full text-zinc-400 gap-2">
-              <div className="animate-pulse text-sm">
-                논문을 불러오고 Claude로 요약 중입니다...
-              </div>
+              <Spinner />
+              <div className="animate-pulse text-sm">논문을 불러오는 중입니다…</div>
             </div>
           ) : loadedPaper ? (
             <div className="space-y-6">
@@ -1645,22 +2151,39 @@ export default function Home() {
                   <h3 className="text-base font-semibold">
                     시각화 요약 (Graphical Abstract)
                   </h3>
-                  {(loadedPaper.geminiImage || geminiError) && !geminiLoading && (
-                    <button
-                      onClick={() => handleGenerateImage(loadedPaper, "gemini")}
-                      className="rounded-md border border-zinc-200 px-2.5 py-1 text-[11px] font-medium text-zinc-500 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-600"
+                  <div className="flex items-center gap-2">
+                    {/* 이미지 모델·품질 선택 (Gemini=한글, GPT=영어 라벨) */}
+                    <select
+                      value={`${imageProvider}|${imageModel}|${imageQuality}`}
+                      onChange={(e) => {
+                        const [p, m, q] = e.target.value.split("|");
+                        setImageProvider(
+                          p as "gemini" | "openai" | "flux" | "ideogram",
+                        );
+                        setImageModel(m);
+                        setImageQuality(q);
+                      }}
+                      disabled={geminiLoading || summaryPending}
+                      className="rounded-md border border-zinc-200 bg-white px-2 py-1 text-[11px] text-zinc-700 disabled:opacity-50"
                     >
-                      다시 생성
-                    </button>
-                  )}
+                      {IMAGE_MODEL_OPTIONS.map((o) => (
+                        <option key={o.v} value={o.v}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                    {(loadedPaper.geminiImage || geminiError) && !geminiLoading && (
+                      <button
+                        onClick={() => handleGenerateImage(loadedPaper)}
+                        className="rounded-md border border-zinc-200 px-2.5 py-1 text-[11px] font-medium text-zinc-500 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-600"
+                      >
+                        다시 생성
+                      </button>
+                    )}
+                  </div>
                 </div>
                 {geminiLoading ? (
-                  <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 py-10 text-sm text-zinc-400">
-                    <div className="animate-pulse">
-                      핵심 내용을 한 장의 그림으로 만드는 중입니다...
-                    </div>
-                    <div className="text-xs">(수십 초 소요)</div>
-                  </div>
+                  <ImageProgress elapsed={imageElapsed} />
                 ) : geminiError ? (
                   <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
                     <div className="mb-1 font-medium">
@@ -1668,7 +2191,7 @@ export default function Home() {
                     </div>
                     <div className="mb-2 text-xs">{geminiError}</div>
                     <button
-                      onClick={() => handleGenerateImage(loadedPaper, "gemini")}
+                      onClick={() => handleGenerateImage(loadedPaper)}
                       className="text-xs underline hover:text-red-800"
                     >
                       다시 시도
@@ -1695,13 +2218,18 @@ export default function Home() {
                       </span>
                     </div>
                   </div>
+                ) : summaryPending ? (
+                  <div className="flex items-center gap-2 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-400">
+                    <Spinner small />
+                    요약이 완료되면 시각화 요약을 자동으로 만듭니다.
+                  </div>
                 ) : (
                   <div className="flex items-center justify-between gap-2 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 p-3">
                     <span className="text-xs text-zinc-400">
                       핵심 내용을 한눈에 보는 시각화 요약을 만들 수 있어요.
                     </span>
                     <button
-                      onClick={() => handleGenerateImage(loadedPaper, "gemini")}
+                      onClick={() => handleGenerateImage(loadedPaper)}
                       className="shrink-0 rounded-md bg-zinc-900 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-zinc-700"
                     >
                       이미지 생성
@@ -1709,6 +2237,63 @@ export default function Home() {
                   </div>
                 )}
               </section>
+
+              {/* 요약 상태: 생성 중=스켈레톤 · 실패=재시도 · 완료=실제 내용 */}
+              {summaryPending ? (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 text-sm text-slate-500">
+                    <Spinner />
+                    <span>
+                      Claude가 핵심 요약을 작성하고 있어요. 원문과 그림은 먼저 확인할 수 있습니다.
+                    </span>
+                  </div>
+                  <SummarySkeleton />
+                </div>
+              ) : summaryError ? (
+                <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                  <div className="mb-1 font-medium">요약 생성에 실패했습니다.</div>
+                  <div className="mb-3 text-xs">{summaryError}</div>
+                  <button
+                    onClick={() =>
+                      loadSummary(loadedPaper.paper, loadedPaper.pdfUrl)
+                    }
+                    className="rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700"
+                  >
+                    요약 다시 시도
+                  </button>
+                </div>
+              ) : (
+                <>
+                  {/* 요약 언어 전환 (한/영) — 의학용어는 영어 원어가 더 명확한 경우가 있음 */}
+                  <div className="flex items-center justify-end gap-2">
+                    <span className="text-[12px] text-slate-500">요약 언어</span>
+                <div className="flex items-center gap-1">
+                  {(
+                    [
+                      ["ko", "한국어"],
+                      ["en", "English"],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <button
+                      key={key}
+                      onClick={() => switchSummaryLang(key)}
+                      disabled={summaryLangLoading}
+                      className={`rounded-full px-2.5 py-1 text-[12px] font-medium transition-colors disabled:opacity-50 ${
+                        summaryLang === key
+                          ? "bg-blue-600 text-white"
+                          : "bg-zinc-100 text-slate-600 hover:bg-zinc-200"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {summaryLangLoading && (
+                  <span className="text-[11px] text-slate-400 animate-pulse">
+                    전환 중…
+                  </span>
+                )}
+              </div>
 
               {loadedPaper.summary.keyFindings?.length > 0 && (
                 <section className="rounded-xl border border-blue-200/70 bg-blue-50/50 p-4">
@@ -1788,12 +2373,14 @@ export default function Home() {
                 tone="emerald"
                 render={renderSummaryText}
               />
-              <SummarySection
-                title="핵심 메시지"
-                body={loadedPaper.summary.keyMessage}
-                tone="amber"
-                render={renderSummaryText}
-              />
+                  <SummarySection
+                    title="핵심 메시지"
+                    body={loadedPaper.summary.keyMessage}
+                    tone="amber"
+                    render={renderSummaryText}
+                  />
+                </>
+              )}
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center h-full text-zinc-400">
@@ -1811,9 +2398,9 @@ export default function Home() {
                   d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"
                 />
               </svg>
-              <p className="text-sm">좌측에 PubMed ID나 DOI를 입력하세요</p>
+              <p className="text-sm">좌측에 PubMed ID · DOI · PMCID를 입력하세요</p>
               <p className="text-xs mt-1 text-zinc-400">
-                예) PMID: 37291234 / DOI: 10.1056/NEJMoa2034577
+                예) PMID: 37291234 / DOI: 10.1056/NEJMoa2034577 / PMCID: PMC10250308
               </p>
             </div>
           )}
@@ -1824,16 +2411,18 @@ export default function Home() {
         <>
           <div
             onMouseDown={() => startResize("right")}
-            className="w-1.5 shrink-0 cursor-col-resize bg-zinc-200 hover:bg-blue-400 active:bg-blue-500 transition-colors"
+            className="w-1.5 shrink-0 cursor-col-resize bg-zinc-200 hover:bg-blue-400 active:bg-blue-500 transition-colors max-lg:hidden"
             title="드래그하여 너비 조절"
           />
 
           <aside
             style={{ width: rightW }}
-            className="shrink-0 border-l border-slate-200 bg-slate-50 flex flex-col overflow-hidden"
+            className={`shrink-0 border-l border-slate-200 bg-slate-50 flex flex-col overflow-hidden max-lg:!w-full max-lg:border-l-0 ${
+              mobileView === "tools" ? "" : "max-lg:hidden"
+            }`}
           >
         <div className="border-b border-slate-200 bg-slate-50/60">
-          <div className="flex overflow-x-auto scrollbar-none px-1.5 pt-1.5">
+          <div className="flex overflow-x-auto scrollbar-none px-1 pt-1.5">
             {(
               [
                 { key: "guide", label: "읽기 가이드" },
@@ -1841,6 +2430,7 @@ export default function Home() {
                 { key: "stats", label: "통계 해석" },
                 { key: "quiz", label: "퀴즈" },
                 { key: "qa", label: "Q&A" },
+                { key: "slides", label: "발표 슬라이드" },
                 // 시각화 → 중앙으로 이동, 신뢰도·의학용어 해석 → 일시 비활성화 (코드/탭 렌더는 아래 보존)
               ] as { key: RightTab; label: string }[]
             ).map(({ key, label }) => (
@@ -1848,10 +2438,10 @@ export default function Home() {
                 key={key}
                 onClick={() => handleTabChange(key)}
                 disabled={!loadedPaper}
-                className={`shrink-0 rounded-t-lg px-3.5 py-2.5 text-[13px] font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                className={`shrink-0 whitespace-nowrap rounded-t-lg px-2 py-2 text-[12px] font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
                   activeTab === key
                     ? "bg-white text-blue-600 shadow-[0_-2px_0_inset_rgba(37,99,235,1)]"
-                    : "text-slate-500 hover:bg-white/60 hover:text-slate-700"
+                    : "text-slate-600 hover:bg-white/60 hover:text-slate-800"
                 }`}
               >
                 {label}
@@ -2471,9 +3061,7 @@ export default function Home() {
                       {geminiError}
                     </div>
                   ) : geminiLoading ? (
-                    <div className="text-center text-xs text-zinc-400 py-6 animate-pulse">
-                      이미지를 생성하는 중입니다... (수십 초 소요)
-                    </div>
+                    <ImageProgress elapsed={imageElapsed} compact />
                   ) : loadedPaper.geminiImage ? (
                     <div className="space-y-2">
                       {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -2505,10 +3093,194 @@ export default function Home() {
             )}
           </div>
         )}
+        {activeTab === "slides" && (
+          <div className="flex-1 overflow-y-auto p-4">
+            {!loadedPaper ? (
+              <div className="text-center text-sm text-slate-400 mt-14 px-6">
+                <p>발표 슬라이드 탭</p>
+                <p className="text-xs mt-2">좌측에서 논문을 먼저 분석하세요</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <p className="text-xs leading-relaxed text-slate-500">
+                  분석한 논문을 발표용 슬라이드(.pptx)로 내려받습니다. 원문에 그림이 있으면
+                  원본 캡션과 함께 자동으로 포함됩니다.
+                </p>
+
+                {/* 요약 그대로 — 조립(무 LLM) */}
+                <div className="rounded-xl border border-slate-200 bg-white p-3.5">
+                  <div className="text-[13px] font-semibold text-slate-700">요약 그대로</div>
+                  <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+                    분석한 요약·통계·그림을 그대로 조립합니다. AI 생성 없이 만들어 원문 분석과 내용이 같습니다.
+                  </p>
+                  <button
+                    onClick={() => downloadSlides("compose")}
+                    disabled={slidesMode !== null}
+                    className="mt-2.5 w-full rounded-lg bg-slate-800 px-3 py-2 text-[13px] font-medium text-white transition-colors hover:bg-slate-700 disabled:opacity-50"
+                  >
+                    {slidesMode === "compose" ? "생성 중…" : "요약 그대로 (.pptx)"}
+                  </button>
+                </div>
+
+                {/* AI 재구성 — 추가 요구사항 반영 */}
+                <div className="rounded-xl border border-slate-200 bg-white p-3.5">
+                  <div className="text-[13px] font-semibold text-slate-700">AI 재구성</div>
+                  <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+                    논문 내용과 요약을 바탕으로 AI가 발표용으로 재구성합니다. 원문에 없는 내용은 넣지 않습니다.
+                  </p>
+                  <label className="mt-2.5 block text-[11px] font-medium text-slate-500">
+                    추가 요구사항 (선택)
+                  </label>
+                  <textarea
+                    value={slidesRequirements}
+                    onChange={(e) => setSlidesRequirements(e.target.value.slice(0, 500))}
+                    placeholder="예: 저널클럽 발표용, 통계 해석을 자세히 / 8장 이내로 / 방법보다 결과 중심으로"
+                    rows={3}
+                    className="mt-1 w-full resize-none rounded-lg border border-slate-200 bg-slate-50/60 px-2.5 py-2 text-[12px] text-slate-700 placeholder:text-slate-400 focus:border-teal-300 focus:outline-none focus:ring-1 focus:ring-teal-200"
+                  />
+                  <div className="mt-1 flex items-start justify-between gap-2">
+                    <span className="text-[10px] leading-tight text-slate-400">
+                      요구사항은 이 모드에만 반영됩니다. 항상 원문 내용에 근거해 작성됩니다.
+                    </span>
+                    <span className="shrink-0 text-[10px] tabular-nums text-slate-400">
+                      {slidesRequirements.length}/500
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => downloadSlides("llm")}
+                    disabled={slidesMode !== null}
+                    className="mt-2.5 w-full rounded-lg bg-teal-600 px-3 py-2 text-[13px] font-medium text-white transition-colors hover:bg-teal-700 disabled:opacity-50"
+                  >
+                    {slidesMode === "llm" ? "생성 중…" : "AI 재구성 (.pptx)"}
+                  </button>
+                </div>
+
+                {slidesError && (
+                  <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[12px] text-red-600">
+                    {slidesError}
+                  </div>
+                )}
+                {slidesResult && !slidesError && (
+                  <div className="rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 text-[12px] text-teal-700">
+                    {slidesResult.mode === "llm" ? "AI 재구성" : "요약 그대로"} 슬라이드{" "}
+                    {slidesResult.slides}장
+                    {slidesResult.figures > 0
+                      ? ` · 원문 그림 ${slidesResult.figures}장 포함`
+                      : " · 포함된 원문 그림 없음"}{" "}
+                    — 다운로드됨
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
           </aside>
         </>
       )}
       </div>
+
+      {/* 모바일 하단 뷰 전환 (lg 미만에서만) */}
+      <nav className="lg:hidden shrink-0 grid grid-cols-3 border-t border-slate-200 bg-white">
+        {(
+          [
+            { key: "original", label: "원문" },
+            { key: "summary", label: "핵심요약" },
+            { key: "tools", label: "읽기도구" },
+          ] as { key: "original" | "summary" | "tools"; label: string }[]
+        ).map(({ key, label }) => (
+          <button
+            key={key}
+            onClick={() => setMobileView(key)}
+            className={`py-2.5 text-[13px] font-medium transition-colors ${
+              mobileView === key
+                ? "text-blue-600 shadow-[0_-2px_0_inset_rgba(37,99,235,1)]"
+                : "text-slate-400 hover:text-slate-600"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+    </div>
+  );
+}
+
+// 회전 스피너(작은 원형 로더). small=더 작게.
+function Spinner({ small = false }: { small?: boolean }) {
+  const s = small ? "h-3.5 w-3.5" : "h-4 w-4";
+  return (
+    <span
+      className={`inline-block ${s} shrink-0 animate-spin rounded-full border-2 border-zinc-300 border-t-blue-500`}
+      aria-hidden
+    />
+  );
+}
+
+// 이미지 생성 진행 표시 — 경과 시간 + 부드럽게 차오르는 진행바로 체감 대기시간을 낮춘다.
+// 실제 진행률은 알 수 없어 시간 기반으로 ~95%까지 점근(완료되면 부모가 언마운트).
+function ImageProgress({
+  elapsed,
+  compact = false,
+}: {
+  elapsed: number;
+  compact?: boolean;
+}) {
+  const pct = Math.min(95, Math.round(100 * (1 - Math.exp(-elapsed / 18))));
+  return (
+    <div
+      className={`rounded-xl border border-dashed border-zinc-200 bg-zinc-50 ${
+        compact ? "p-3" : "p-5"
+      }`}
+    >
+      <div className="mb-2 flex items-center gap-2 text-sm text-zinc-500">
+        <Spinner />
+        <span>핵심 내용을 한 장의 그림으로 그리는 중…</span>
+        <span className="ml-auto tabular-nums text-xs text-zinc-400">
+          {elapsed}초
+        </span>
+      </div>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-200">
+        <div
+          className="h-full rounded-full bg-blue-500 transition-[width] duration-300 ease-out"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      {!compact && (
+        <p className="mt-2 text-[11px] text-zinc-400">
+          고품질 이미지(Gemini 3 Pro)는 수십 초가 걸릴 수 있어요. 잠시만 기다려 주세요.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// 요약 생성 중 자리표시자(스켈레톤) — 핵심 결과 카드 + 본문 섹션 형태를 흉내낸다.
+function SummarySkeleton() {
+  return (
+    <div className="space-y-4" aria-hidden>
+      <div className="rounded-xl border border-blue-200/60 bg-blue-50/40 p-4">
+        <div className="mb-3 h-4 w-24 animate-pulse rounded bg-blue-200/60" />
+        <div className="space-y-2">
+          {[0, 1].map((i) => (
+            <div
+              key={i}
+              className="rounded-lg border border-l-4 border-slate-200 border-l-blue-300 bg-white p-3"
+            >
+              <div className="mb-2 h-3.5 w-3/4 animate-pulse rounded bg-slate-200" />
+              <div className="h-3 w-11/12 animate-pulse rounded bg-slate-100" />
+            </div>
+          ))}
+        </div>
+      </div>
+      {[0, 1, 2].map((i) => (
+        <div key={i} className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="mb-2 h-4 w-20 animate-pulse rounded bg-slate-200" />
+          <div className="space-y-1.5">
+            <div className="h-3 w-full animate-pulse rounded bg-slate-100" />
+            <div className="h-3 w-5/6 animate-pulse rounded bg-slate-100" />
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

@@ -37,7 +37,8 @@ export async function POST(request: Request) {
       .join("\n\n");
 
     const response = await client.messages.create({
-      model: "claude-sonnet-4-6",
+      // 인라인 호버 해설 — 즉시 응답이 UX에 중요. 짧은 용어 설명은 Haiku로 충분히 빠르고 정확.
+      model: "claude-haiku-4-5",
       max_tokens: 512,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userContent }],
